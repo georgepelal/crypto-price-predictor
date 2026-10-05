@@ -365,3 +365,55 @@ def add_multitimeframe_features(
 
     return out
 
+
+def add_cross_asset_features(
+    df_primary: pd.DataFrame,
+    df_secondary: Optional[pd.DataFrame] = None,
+    secondary_symbol: str = "ETH",
+) -> pd.DataFrame:
+    """Compute Cross-Asset Lead-Lag, Beta, and Relative Strength features with zero lookahead.
+
+    Compares primary asset (e.g. BTC) against secondary asset (e.g. ETH) to gauge
+    systemic crypto risk appetite and inter-market momentum.
+    """
+    out = df_primary.copy()
+    if df_secondary is None or df_secondary.empty:
+        return out
+
+    out.index = pd.to_datetime(out.index, utc=True)
+    sec = df_secondary.copy()
+    sec.index = pd.to_datetime(sec.index, utc=True)
+
+    sec_close = sec["close"].reindex(out.index).ffill().bfill()
+    prim_close = out["close"]
+
+    prefix = f"cross_{secondary_symbol.lower()}_"
+
+    # 1. Price Ratio (e.g. ETH / BTC)
+    ratio = sec_close / (prim_close + 1e-10)
+    out[f"{prefix}ratio"] = ratio
+
+    # 2. Return Divergences (1h and 24h relative strength)
+    sec_ret_1h = sec_close.pct_change().fillna(0.0)
+    prim_ret_1h = prim_close.pct_change().fillna(0.0)
+    out[f"{prefix}mom_divergence_1h"] = sec_ret_1h - prim_ret_1h
+
+    sec_ret_24h = (sec_close / sec_close.shift(24).replace(0, np.nan) - 1.0).fillna(0.0)
+    prim_ret_24h = (prim_close / prim_close.shift(24).replace(0, np.nan) - 1.0).fillna(0.0)
+    out[f"{prefix}mom_divergence_24h"] = sec_ret_24h - prim_ret_24h
+
+    # 3. Ratio Momentum & Oscillators
+    out[f"{prefix}ratio_rsi"] = compute_rsi(ratio, period=min(14, len(ratio) - 1))
+    ratio_sma = ratio.rolling(24, min_periods=1).mean()
+    out[f"{prefix}ratio_dist_ma24"] = (ratio - ratio_sma) / (ratio_sma + 1e-10)
+
+    # 4. Risk-On / Beta Acceleration Indicator
+    # When secondary asset (e.g. ETH) is aggressively outperforming on 24h basis -> Risk-On (+1)
+    risk_on = pd.Series(0.0, index=out.index)
+    risk_on[out[f"{prefix}mom_divergence_24h"] > 0.015] = 1.0
+    risk_on[out[f"{prefix}mom_divergence_24h"] < -0.015] = -1.0
+    out[f"{prefix}risk_on_regime"] = risk_on
+
+    return out
+
+

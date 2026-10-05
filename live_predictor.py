@@ -67,6 +67,18 @@ def predict_next_candle(
     feat_df = generate_crypto_features(raw_df)
     feat_df = add_multitimeframe_features(feat_df, df_4h=df_4h, df_1d=df_1d)
 
+    # Fetch cross-asset data if model was trained with cross-asset features
+    if any("cross_" in c for c in feature_cols):
+        sec_sym = "ETH/USDT" if "BTC" in symbol else "BTC/USDT"
+        sec_name = "ETH" if "ETH" in sec_sym else "BTC"
+        try:
+            sec_df = fetch_ohlcv_ccxt(symbol=sec_sym, timeframe=timeframe, total_bars=120, force_download=False)
+            if sec_df is not None and not sec_df.empty:
+                from src.features import add_cross_asset_features
+                feat_df = add_cross_asset_features(feat_df, df_secondary=sec_df, secondary_symbol=sec_name)
+        except Exception:
+            pass
+
     # Ensure all expected feature columns exist
     for col in feature_cols:
         if col not in feat_df.columns:
@@ -178,6 +190,12 @@ def predict_next_candle(
         is_wknd = bool(float(latest_bar.get("is_weekend", 0)) > 0)
         session_str = "LONDON/NY OVERLAP (Max Institutional Liquidity)" if is_overlap else ("CORE EU/US TRADING" if is_core else ("WEEKEND LULL (Low Depth)" if is_wknd else "ASIAN SESSION / OFF-HOURS"))
         print(f" Institutional Session: {session_str}")
+    if "cross_eth_ratio" in latest_bar or "cross_btc_ratio" in latest_bar:
+        sec_sym = "ETH" if "cross_eth_ratio" in latest_bar else "BTC"
+        r_val = float(latest_bar.get(f"cross_{sec_sym.lower()}_ratio", 0))
+        div_val = float(latest_bar.get(f"cross_{sec_sym.lower()}_mom_divergence_24h", 0))
+        risk_str = "RISK-ON (Alt Beta Surge)" if div_val > 0.015 else ("RISK-OFF (Defensive Flow)" if div_val < -0.015 else "NEUTRAL BETA")
+        print(f" Cross-Asset Dynamics : {sec_sym} Ratio={r_val:.5f} | 24h Div={div_val*100:+.2f}% ({risk_str})")
     if "funding_rate" in latest_bar:
         print(f" Funding Rate (8h)    : {latest_bar['funding_rate'] * 100:+.4f}% (Z-Score: {latest_bar.get('fr_zscore', 0):+.2f})")
     if "oi_val" in latest_bar:

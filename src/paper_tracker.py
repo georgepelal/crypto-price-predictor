@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import sqlite3
 from typing import Dict, Any, Optional, List
+import numpy as np
 import pandas as pd
 
 
@@ -90,6 +91,34 @@ def get_open_position(symbol: str, db_path: str = DEFAULT_DB_PATH) -> Optional[D
         )
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def compute_fractional_kelly_risk(
+    p_win: float,
+    sl_distance: float,
+    tp_distance: float,
+    kelly_fraction: float = 0.25,
+    min_risk: float = 0.005,
+    max_risk: float = 0.035,
+    default_risk: float = 0.020,
+) -> float:
+    """Compute dynamic risk percentage using Fractional Kelly Criterion.
+
+    Formula: f* = (p * b - (1 - p)) / b
+    where b = tp_distance / sl_distance (win/loss payoff ratio).
+    """
+    if sl_distance <= 1e-8 or tp_distance <= 1e-8:
+        return default_risk
+
+    b = tp_distance / sl_distance
+    q = 1.0 - p_win
+    f_star = (p_win * b - q) / (b + 1e-10)
+
+    if f_star <= 0.0:
+        return min_risk
+
+    f_scaled = f_star * kelly_fraction
+    return float(np.clip(f_scaled, min_risk, max_risk))
 
 
 def execute_paper_candle(
@@ -252,8 +281,11 @@ def execute_paper_candle(
 
         if not has_open:
             if "BUY" in signal or "LONG" in signal:
-                risk_amt = starting_capital * risk_per_trade
+                p_win = p_up if p_up > 0 else 0.55
                 sl_distance = abs(close_price - sl_price) if sl_price else (close_price * 0.02)
+                tp_distance = abs(tp_price - close_price) if tp_price else (close_price * 0.02)
+                dynamic_risk = compute_fractional_kelly_risk(p_win, sl_distance, tp_distance, default_risk=risk_per_trade)
+                risk_amt = starting_capital * dynamic_risk
                 qty = risk_amt / (sl_distance + 1e-8)
                 max_pos_usd = starting_capital * 0.50
                 if (qty * close_price) > max_pos_usd:
@@ -265,11 +297,14 @@ def execute_paper_candle(
                     (symbol, time_str, close_price, qty, sl_price, tp_price, close_price * qty * cost_rate),
                 )
                 cursor.execute("UPDATE signals_log SET executed = 1 WHERE id = ?;", (signal_id,))
-                action_log.append(f"Opened virtual LONG at ${close_price:,.2f} (Qty: {qty:.4f}, SL: ${sl_price:,.2f}, TP: ${tp_price:,.2f})")
+                action_log.append(f"Opened virtual LONG at ${close_price:,.2f} (Qty: {qty:.4f}, Risk: {dynamic_risk*100:.2f}%, SL: ${sl_price:,.2f}, TP: ${tp_price:,.2f})")
 
             elif "SELL" in signal or "SHORT" in signal:
-                risk_amt = starting_capital * risk_per_trade
+                p_win = p_down if p_down > 0 else 0.55
                 sl_distance = abs(sl_price - close_price) if sl_price else (close_price * 0.02)
+                tp_distance = abs(close_price - tp_price) if tp_price else (close_price * 0.02)
+                dynamic_risk = compute_fractional_kelly_risk(p_win, sl_distance, tp_distance, default_risk=risk_per_trade)
+                risk_amt = starting_capital * dynamic_risk
                 qty = risk_amt / (sl_distance + 1e-8)
                 max_pos_usd = starting_capital * 0.50
                 if (qty * close_price) > max_pos_usd:
@@ -281,7 +316,7 @@ def execute_paper_candle(
                     (symbol, time_str, close_price, qty, sl_price, tp_price, close_price * qty * cost_rate),
                 )
                 cursor.execute("UPDATE signals_log SET executed = 1 WHERE id = ?;", (signal_id,))
-                action_log.append(f"Opened virtual SHORT at ${close_price:,.2f} (Qty: {qty:.4f}, SL: ${sl_price:,.2f}, TP: ${tp_price:,.2f})")
+                action_log.append(f"Opened virtual SHORT at ${close_price:,.2f} (Qty: {qty:.4f}, Risk: {dynamic_risk*100:.2f}%, SL: ${sl_price:,.2f}, TP: ${tp_price:,.2f})")
 
         conn.commit()
 

@@ -49,6 +49,8 @@ def main():
     parser.add_argument("--conformal-alpha", type=float, default=0.20, help="Conformal significance level error budget (default 0.20)")
     parser.add_argument("--use-regime-filter", action="store_true", help="Enable Market Regime Filter (veto high-vol chop)")
     parser.add_argument("--use-mtf-gate", action="store_true", help="Enforce hard structural Multi-Timeframe trend gating")
+    parser.add_argument("--use-cross-asset", action="store_true", help="Enable Cross-Asset Lead-Lag features (ETH/BTC ratio & beta)")
+    parser.add_argument("--model-type", type=str, default="auto", choices=["auto", "ensemble", "lightgbm", "hist"], help="Classifier architecture (auto, ensemble, lightgbm, hist)")
     args = parser.parse_args()
 
     # Load default configuration
@@ -135,6 +137,24 @@ def main():
         feat_df = add_multitimeframe_features(feat_df, df_4h=df_4h, df_1d=df_1d)
         print("[+] Merged Multi-Timeframe signals (4h EMA trend, 4h RSI, Daily range & Confluence).")
 
+    # Ingest and merge Cross-Asset Lead-Lag features if enabled
+    if args.use_cross_asset:
+        sec_sym = "ETH/USDT" if "BTC" in symbol else "BTC/USDT"
+        sec_name = "ETH" if "ETH" in sec_sym else "BTC"
+        print(f"[*] Ingesting Cross-Asset Benchmark data ({sec_sym})...")
+        df_sec = fetch_ohlcv_ccxt(
+            symbol=sec_sym,
+            timeframe=timeframe,
+            total_bars=total_bars,
+            exchange_name=exchange,
+            cache_dir=data_cfg.get("raw_dir", "data/raw"),
+            force_download=args.force_download,
+        )
+        if df_sec is not None and not df_sec.empty:
+            from src.features import add_cross_asset_features
+            feat_df = add_cross_asset_features(feat_df, df_secondary=df_sec, secondary_symbol=sec_name)
+            print(f"[+] Merged Cross-Asset signals ({sec_name} ratio, beta momentum, and risk-on regime).")
+
     atr_mult = label_cfg.get("atr_multiplier", 0.35)
     max_depth = model_cfg.get("max_depth", 5)
     learning_rate = model_cfg.get("learning_rate", 0.03)
@@ -201,7 +221,7 @@ def main():
         y,
         n_splits=model_cfg.get("n_splits", 5),
         min_train_size=effective_min_train,
-        model_type=model_cfg.get("type", "auto"),
+        model_type=args.model_type if args.model_type != "auto" else model_cfg.get("type", "auto"),
         max_depth=max_depth,
         learning_rate=learning_rate,
         max_iter=max_iter,

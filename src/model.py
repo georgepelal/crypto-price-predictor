@@ -6,14 +6,41 @@ Supports LightGBM and scikit-learn HistGradientBoosting with automatic fallback.
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier, VotingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, classification_report, log_loss
 import joblib
 
 
 def get_model_instance(model_type: str = "auto", random_state: int = 42, **kwargs) -> Tuple[Any, str]:
-    """Instantiate classifier with automatic fallback between LightGBM and HistGradientBoosting."""
-    if model_type in ["lightgbm", "auto"]:
+    """Instantiate classifier with automatic fallback between LightGBM, HistGradientBoosting, and Ensemble."""
+    if model_type == "ensemble":
+        m1 = HistGradientBoostingClassifier(
+            max_iter=kwargs.get("max_iter", 180),
+            learning_rate=kwargs.get("learning_rate", 0.03),
+            max_depth=kwargs.get("max_depth", 5),
+            random_state=random_state,
+        )
+        m2 = RandomForestClassifier(
+            n_estimators=kwargs.get("rf_estimators", 80),
+            max_depth=kwargs.get("max_depth", 6),
+            random_state=random_state,
+            n_jobs=-1,
+        )
+        m3 = make_pipeline(
+            StandardScaler(),
+            LogisticRegression(max_iter=400, C=1.0, random_state=random_state),
+        )
+        ens = VotingClassifier(
+            estimators=[("hgb", m1), ("rf", m2), ("lr", m3)],
+            voting="soft",
+            weights=[0.50, 0.30, 0.20],
+        )
+        return ens, "Heterogeneous Ensemble (HGB+RF+LR)"
+
+    if model_type in ["lightgbm"]:
         try:
             import lightgbm as lgb
             params = {
@@ -23,13 +50,11 @@ def get_model_instance(model_type: str = "auto", random_state: int = 42, **kwarg
                 "random_state": random_state,
                 "verbosity": -1,
             }
-            # Test instantiation and small dummy fit to verify dynamic libraries like libomp
             test_model = lgb.LGBMClassifier(**params)
             test_model.fit([[0, 1], [1, 0]], [0, 1])
             return lgb.LGBMClassifier(**params), "LightGBM"
         except Exception as e:
-            if model_type == "lightgbm":
-                print(f"[!] LightGBM failed to load ({e}). Falling back to HistGradientBoosting...")
+            print(f"[!] LightGBM failed to load ({e}). Falling back to HistGradientBoosting...")
 
     # Native sklearn HistGradientBoosting (zero C++ dylib dependencies, same histogram tree algorithm)
     params = {

@@ -340,9 +340,40 @@ class TestCryptoMLPipeline(unittest.TestCase):
         probs = train_res["oof_probs"].dropna()
         np.testing.assert_allclose(probs.sum(axis=1), 1.0, atol=1e-5)
 
+    def test_cross_asset_features(self):
+        from src.features import add_cross_asset_features
+        df_eth = self.df.copy()
+        df_eth["close"] = df_eth["close"] * 0.05
+        df_cross = add_cross_asset_features(self.df, df_secondary=df_eth, secondary_symbol="ETH")
+        self.assertIn("cross_eth_ratio", df_cross.columns)
+        self.assertIn("cross_eth_mom_divergence_1h", df_cross.columns)
+        self.assertIn("cross_eth_mom_divergence_24h", df_cross.columns)
+        self.assertIn("cross_eth_risk_on_regime", df_cross.columns)
+
+    def test_heterogeneous_ensemble(self):
+        from src.model import get_model_instance
+        model, name = get_model_instance(model_type="ensemble", max_iter=20, rf_estimators=10)
+        self.assertIn("Heterogeneous Ensemble", name)
+        X = np.random.randn(50, 4)
+        y = np.random.choice([0, 1, 2], 50)
+        model.fit(X, y)
+        probs = model.predict_proba(X)
+        self.assertEqual(probs.shape, (50, 3))
+        np.testing.assert_allclose(probs.sum(axis=1), 1.0, atol=1e-5)
+
+    def test_fractional_kelly_sizing(self):
+        from src.paper_tracker import compute_fractional_kelly_risk
+        r_high = compute_fractional_kelly_risk(p_win=0.75, sl_distance=1.8, tp_distance=1.2)
+        self.assertGreater(r_high, 0.015)
+        self.assertLessEqual(r_high, 0.035)
+
+        r_low = compute_fractional_kelly_risk(p_win=0.40, sl_distance=1.8, tp_distance=1.2)
+        self.assertEqual(r_low, 0.005)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
