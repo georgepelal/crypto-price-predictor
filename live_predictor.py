@@ -172,6 +172,12 @@ def predict_next_candle(
         is_bear = bool(float(latest_bar.get("micro_liq_flush_bearish", 0)) > 0)
         flush_str = "BULLISH FLUSH (Snapback Reversal)" if is_bull else ("BEARISH FLUSH (Snapback Reversal)" if is_bear else "None (Calm)")
         print(f" Liquidation Cascade  : {flush_str}")
+    if "session_london_ny_overlap" in latest_bar:
+        is_overlap = bool(float(latest_bar["session_london_ny_overlap"]) > 0)
+        is_core = bool(float(latest_bar.get("session_core_hours", 0)) > 0)
+        is_wknd = bool(float(latest_bar.get("is_weekend", 0)) > 0)
+        session_str = "LONDON/NY OVERLAP (Max Institutional Liquidity)" if is_overlap else ("CORE EU/US TRADING" if is_core else ("WEEKEND LULL (Low Depth)" if is_wknd else "ASIAN SESSION / OFF-HOURS"))
+        print(f" Institutional Session: {session_str}")
     if "funding_rate" in latest_bar:
         print(f" Funding Rate (8h)    : {latest_bar['funding_rate'] * 100:+.4f}% (Z-Score: {latest_bar.get('fr_zscore', 0):+.2f})")
     if "oi_val" in latest_bar:

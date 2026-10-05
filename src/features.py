@@ -210,7 +210,7 @@ def generate_crypto_features(
     rolling_vwap = pv / (v_sum + 1e-10)
     feat["dist_to_vwap"] = (feat["close"] - rolling_vwap) / (feat["close"] + 1e-10)
 
-    # 5. Cyclical Time Features (24h crypto periodicity & weekly seasonality)
+    # 5. Cyclical Time & Institutional Liquidity Features
     if isinstance(feat.index, pd.DatetimeIndex):
         hour = feat.index.hour
         dow = feat.index.dayofweek
@@ -218,6 +218,16 @@ def generate_crypto_features(
         feat["cos_hour"] = np.cos(2 * np.pi * hour / 24.0)
         feat["sin_dow"] = np.sin(2 * np.pi * dow / 7.0)
         feat["cos_dow"] = np.cos(2 * np.pi * dow / 7.0)
+
+        # Institutional session windows & liquidity quality
+        # London/NY Overlap (12:00 - 16:00 UTC): peak global macro volume & high trend follow-through
+        feat["session_london_ny_overlap"] = ((hour >= 12) & (hour <= 16)).astype(float)
+        # Core active European & US hours (07:00 - 20:00 UTC)
+        feat["session_core_hours"] = ((hour >= 7) & (hour <= 20)).astype(float)
+        # Low-volume weekend and Asian dead zone flags
+        feat["is_weekend"] = (dow >= 5).astype(float)
+        feat["session_asian_dead_zone"] = ((hour >= 21) | (hour <= 5)).astype(float)
+        feat["liquidity_quality_score"] = feat["session_core_hours"] * (1.0 - 0.4 * feat["is_weekend"])
 
     # 6. Derivatives & Microstructure Features (Funding Rate & Open Interest)
     if "funding_rate" in feat.columns:

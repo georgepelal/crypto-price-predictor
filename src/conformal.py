@@ -96,9 +96,17 @@ class ConformalClassifier:
             raw_sets.append(candidates)
             set_sizes.append(len(candidates))
 
-            # Singleton condition: Exactly 1 candidate class with high non-conformity certainty
-            if len(candidates) == 1:
-                singletons.append(candidates[0])
+            # Directional Certainty Gate in 3-class buffered setting:
+            # - If [2] or [1, 2]: Down (0) is ruled out at (1-alpha) confidence -> Bullish admissible (2)
+            # - If [0] or [0, 1]: Up (2) is ruled out at (1-alpha) confidence -> Bearish admissible (0)
+            # - If [1]: Pure flat noise -> Neutral (1)
+            # - If [0, 2] or [0, 1, 2] or empty: Directional contradiction / uncertainty -> Abstain (-1)
+            if (2 in candidates) and (0 not in candidates):
+                singletons.append(2)
+            elif (0 in candidates) and (2 not in candidates):
+                singletons.append(0)
+            elif candidates == [1]:
+                singletons.append(1)
             else:
                 singletons.append(-1)  # Abstain / Veto trade
 
@@ -115,14 +123,19 @@ class ConformalClassifier:
         prob_cutoff = 1.0 - self.q_hat
         candidates = [c for c in [0, 1, 2] if prob_dict.get(c, 0.0) >= prob_cutoff]
 
-        is_singleton = (len(candidates) == 1)
-        singleton_class = candidates[0] if is_singleton else None
+        is_bull_admissible = (2 in candidates) and (0 not in candidates)
+        is_bear_admissible = (0 in candidates) and (2 not in candidates)
+        is_pure_flat = (candidates == [1])
+        is_ambiguous = (0 in candidates and 2 in candidates) or (len(candidates) == 0)
+
+        singleton_class = 2 if is_bull_admissible else (0 if is_bear_admissible else (1 if is_pure_flat else None))
 
         return {
             "prediction_set": candidates,
             "set_size": len(candidates),
-            "is_singleton": is_singleton,
+            "is_singleton": len(candidates) == 1,
+            "is_directional_certain": is_bull_admissible or is_bear_admissible,
             "singleton_class": singleton_class,
             "conformal_cutoff": round(prob_cutoff, 4),
-            "abstain": not is_singleton,
+            "abstain": is_ambiguous or is_pure_flat,
         }

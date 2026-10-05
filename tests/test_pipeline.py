@@ -287,6 +287,59 @@ class TestCryptoMLPipeline(unittest.TestCase):
         self.assertTrue(set(liq_res["micro_liq_flush_bullish"].unique()).issubset({0.0, 1.0}))
         self.assertTrue(set(liq_res["micro_liq_flush_bearish"].unique()).issubset({0.0, 1.0}))
 
+    def test_session_liquidity_features(self):
+        feat = generate_crypto_features(self.df)
+        self.assertIn("session_london_ny_overlap", feat.columns)
+        self.assertIn("session_core_hours", feat.columns)
+        self.assertIn("is_weekend", feat.columns)
+        self.assertIn("session_asian_dead_zone", feat.columns)
+        self.assertIn("liquidity_quality_score", feat.columns)
+
+    def test_profit_lock_execution(self):
+        import os
+        from datetime import datetime, timezone
+        from src.paper_tracker import execute_paper_candle, get_paper_trading_summary
+        test_db = "/tmp/test_profit_lock.db"
+        if os.path.exists(test_db):
+            os.remove(test_db)
+
+        now = datetime.now(timezone.utc)
+        # 1. Open Long at 100 with SL 90 and TP 120 (Target gain: +20)
+        res1 = execute_paper_candle("BTC/USDT", now, 100, 102, 98, 100, "LONG / BUY", sl_price=90, tp_price=120, edge=0.20, db_path=test_db)
+        self.assertEqual(len(res1["actions"]), 1)
+
+        # 2. Candle surges to 115 (115 >= 100 + 0.65*20 = 113) -> Profit Lock triggers!
+        # SL elevated to 100 + 0.25*20 = 105
+        res2 = execute_paper_candle("BTC/USDT", now, 108, 115, 107, 114, "NEUTRAL", sl_price=None, tp_price=None, edge=0.0, db_path=test_db)
+        self.assertTrue(any("Profit-Lock Activated" in a for a in res2["actions"]))
+
+        # 3. Next candle market reverses violently down to 103 (below the 105 locked SL)
+        res3 = execute_paper_candle("BTC/USDT", now, 110, 111, 103, 104, "NEUTRAL", sl_price=None, tp_price=None, edge=0.0, db_path=test_db)
+        self.assertTrue(any("PROFIT_LOCK" in a for a in res3["actions"]))
+
+        summary = get_paper_trading_summary(db_path=test_db)
+        self.assertEqual(summary["closed_trades"], 1)
+        self.assertEqual(summary["winning_trades"], 1)
+        self.assertGreater(summary["realized_pnl_usd"], 0)
+
+        if os.path.exists(test_db):
+            os.remove(test_db)
+
+    def test_calibrated_probabilities(self):
+        feat = generate_crypto_features(self.df)
+        labeled = make_directional_labels(feat)
+        cols = ["rsi", "norm_atr", "bb_bandwidth"]
+        clean = labeled[labeled["target"] != -1].dropna(subset=cols + ["target"])
+        X = clean[cols]
+        y = clean["target"].astype(int)
+
+        train_res = train_walk_forward(X, y, n_splits=2, min_train_size=100, calibrate_probabilities=True, max_iter=20)
+        self.assertIn("Calibrated Sigmoid", train_res["model_name"])
+        self.assertGreater(train_res["overall_accuracy"], 0.0)
+        # Check probs sum to 1
+        probs = train_res["oof_probs"].dropna()
+        np.testing.assert_allclose(probs.sum(axis=1), 1.0, atol=1e-5)
+
 
 if __name__ == "__main__":
     unittest.main()

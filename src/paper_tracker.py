@@ -179,6 +179,10 @@ def execute_paper_candle(
                     net_pnl = gross_pnl - fees
                     pnl_pct = (net_pnl / (entry_p * qty)) * 100.0
 
+                    # If closed via stop-loss above entry price, mark as PROFIT_LOCK
+                    if reason == "STOP_LOSS" and exit_p > entry_p:
+                        reason = "PROFIT_LOCK"
+
                     cursor.execute(
                         """UPDATE trades SET
                            status = 'CLOSED', exit_time = ?, exit_price = ?,
@@ -187,6 +191,15 @@ def execute_paper_candle(
                         (time_str, exit_p, reason, net_pnl, pnl_pct, fees, pos_id),
                     )
                     action_log.append(f"Closed LONG #{pos_id} via {reason} at ${exit_p:,.2f} | PnL: ${net_pnl:+,.2f} ({pnl_pct:+.2f}%)")
+                elif pos_tp and pos_tp > entry_p:
+                    # Dynamic Profit Lock: if trade moved >= 65% toward TP, elevate SL to lock profit
+                    target_gain = pos_tp - entry_p
+                    if high_price >= (entry_p + 0.65 * target_gain):
+                        locked_sl = entry_p + (0.25 * target_gain)
+                        if pos_sl is None or locked_sl > pos_sl:
+                            cursor.execute("UPDATE trades SET stop_loss = ? WHERE id = ?;", (locked_sl, pos_id))
+                            pos_sl = locked_sl
+                            action_log.append(f"Profit-Lock Activated on LONG #{pos_id}: Stop-Loss raised to ${locked_sl:,.2f} (+{((locked_sl/entry_p)-1)*100:+.2f}%)")
 
             elif pos_action == "SELL":
                 # Check Stop-Loss hit
@@ -211,6 +224,10 @@ def execute_paper_candle(
                     net_pnl = gross_pnl - fees
                     pnl_pct = (net_pnl / (entry_p * qty)) * 100.0
 
+                    # If closed via stop-loss below entry price, mark as PROFIT_LOCK
+                    if reason == "STOP_LOSS" and exit_p < entry_p:
+                        reason = "PROFIT_LOCK"
+
                     cursor.execute(
                         """UPDATE trades SET
                            status = 'CLOSED', exit_time = ?, exit_price = ?,
@@ -219,6 +236,15 @@ def execute_paper_candle(
                         (time_str, exit_p, reason, net_pnl, pnl_pct, fees, pos_id),
                     )
                     action_log.append(f"Closed SHORT #{pos_id} via {reason} at ${exit_p:,.2f} | PnL: ${net_pnl:+,.2f} ({pnl_pct:+.2f}%)")
+                elif pos_tp and entry_p > pos_tp:
+                    # Dynamic Profit Lock: if trade moved >= 65% toward TP, lower SL to lock profit
+                    target_gain = entry_p - pos_tp
+                    if low_price <= (entry_p - 0.65 * target_gain):
+                        locked_sl = entry_p - (0.25 * target_gain)
+                        if pos_sl is None or locked_sl < pos_sl:
+                            cursor.execute("UPDATE trades SET stop_loss = ? WHERE id = ?;", (locked_sl, pos_id))
+                            pos_sl = locked_sl
+                            action_log.append(f"Profit-Lock Activated on SHORT #{pos_id}: Stop-Loss lowered to ${locked_sl:,.2f} ({((locked_sl/entry_p)-1)*100:+.2f}%)")
 
         # 3. Check for new entry if no position is open
         cursor.execute("SELECT COUNT(*) FROM trades WHERE symbol = ? AND status = 'OPEN';", (symbol,))

@@ -71,6 +71,7 @@ def train_walk_forward(
     n_splits: int = 5,
     min_train_size: int = 500,
     model_type: str = "auto",
+    calibrate_probabilities: bool = True,
     **model_params,
 ) -> Dict[str, Any]:
     """Train and evaluate model strictly using Walk-Forward Cross Validation.
@@ -96,7 +97,16 @@ def train_walk_forward(
         X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
         X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
 
-        model, model_name = get_model_instance(model_type, **model_params)
+        base_model, raw_model_name = get_model_instance(model_type, **model_params)
+        if calibrate_probabilities and len(np.unique(y_train)) >= 2:
+            from sklearn.calibration import CalibratedClassifierCV
+            cv_folds = min(3, max(2, len(X_train) // 80))
+            model = CalibratedClassifierCV(estimator=base_model, method="sigmoid", cv=cv_folds)
+            model_name = f"{raw_model_name} (Calibrated Sigmoid)"
+        else:
+            model = base_model
+            model_name = raw_model_name
+
         model.fit(X_train, y_train)
 
         test_preds = model.predict(X_test)
