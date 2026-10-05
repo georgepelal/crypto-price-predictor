@@ -1,0 +1,40 @@
+data:
+  exchange: "binance"
+  symbol: "BTC/USDT"
+  timeframe: "1h"
+  bars_to_fetch: 700      # 700 bars aligns with Binance 30-day OI history
+  use_derivatives: true   # Fetch Funding Rates & Open Interest
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+
+features:
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  bollinger_period: 20
+  bollinger_std: 2.0
+  atr_period: 14
+  return_lags: [1, 2, 3, 5, 8, 12, 24]
+  volatility_windows: [6, 12, 24]
+
+labeling:
+  forward_bars: 1         # Predict 1-bar ahead return
+  use_volatility_barrier: true
+  atr_multiplier: 0.35    # Threshold = fee + 0.35 * normalized ATR
+  fee_buffer: 0.0005      # 0.05% fee threshold
+
+model:
+  type: "auto"            # "auto" detects LightGBM or falls back to HistGradientBoosting
+  n_splits: 5             # Number of Walk-Forward validation folds
+  min_train_size: 500     # Minimum bars to train initial fold
+  max_depth: 5
+  learning_rate: 0.03
+  max_iter: 200
+  random_state: 42
+
+backtest:
+  initial_capital: 10000.0
+  taker_fee: 0.0005       # 0.05% taker fee
+  slippage: 0.0002        # 0.02% slippage estimate
+  confidence_threshold: 0.55  # Minimum prediction probability to enter a trade
