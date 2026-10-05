@@ -262,6 +262,7 @@ def main():
     parser.add_argument("--confidence", type=float, default=0.35, help="Confidence threshold to trigger entry in absolute mode")
     parser.add_argument("--no-paper-trade", dest="paper_trade", action="store_false", help="Disable virtual paper trade logging")
     parser.add_argument("--watch", action="store_true", help="Run indefinitely, re-checking at each new bar")
+    parser.add_argument("--interval", type=int, default=60, help="Poll interval in seconds when --watch is active (default 60s)")
     args = parser.parse_args()
 
     if not args.watch:
@@ -275,7 +276,7 @@ def main():
         )
         return
 
-    print(f"[*] Starting Paper Trading Watcher for {args.symbol} ({args.timeframe})... Press Ctrl+C to stop.")
+    print(f"[*] Starting Paper Trading Watcher for {args.symbol} ({args.timeframe})... Polling every {args.interval}s. Press Ctrl+C to stop.")
     while True:
         try:
             predict_next_candle(
@@ -286,8 +287,7 @@ def main():
                 edge_threshold=args.edge_threshold,
                 paper_trade=args.paper_trade,
             )
-            # Sleep 60 seconds before next check
-            time.sleep(60)
+            time.sleep(args.interval)
         except KeyboardInterrupt:
             print("\n[*] Stopping paper trading bot.")
             sys.exit(0)
