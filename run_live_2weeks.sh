@@ -27,19 +27,19 @@ if [ -f "$PID_FILE" ]; then
 fi
 
 echo "=================================================================="
-echo " Starting 2-Week Autonomous Multi-Asset Paper Trading Bot"
+echo " Starting core-model paper trader (paper_trader.py, no real orders)"
 echo " Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 echo " Logging to: $LOG_FILE"
 echo "=================================================================="
 
 # Run caffeinate to prevent Mac from sleeping system while process runs, in background
-nohup caffeinate -s "$PYTHON_BIN" multi_asset_scanner.py --watch --interval 60 >> "$LOG_FILE" 2>&1 &
+nohup caffeinate -s "$PYTHON_BIN" paper_trader.py >> "$LOG_FILE" 2>&1 &
 NEW_PID=$!
 
 echo "$NEW_PID" > "$PID_FILE"
 echo "[+] Bot started successfully in background!"
 echo "    PID: $NEW_PID"
 echo "    Monitor live logs: tail -f logs/live_trader.log"
-echo "    View Dashboard   : .venv/bin/python3 report_dashboard.py"
+echo "    Ledger summary   : .venv/bin/python3 paper_trader.py --status"
 echo "    Stop the bot     : ./stop_live_2weeks.sh"
 echo "=================================================================="

@@ -25,16 +25,8 @@ else
 fi
 
 echo "------------------------------------------------------------------"
-echo " PORTFOLIO & RECENT TRADES (SQLite Database)"
-"$PYTHON_BIN" -c "
-from src.paper_tracker import get_paper_trading_summary
-s = get_paper_trading_summary()
-print(f\"  Total Closed Trades : {s['closed_trades']}\")
-print(f\"  Winning Trades       : {s['winning_trades']} ({s['win_rate_pct']:.1f}% Win Rate)\")
-print(f\"  Realized PnL         : \${s['realized_pnl_usd']:+,.2f}\")
-print(f\"  Total Fees Paid      : \${s['total_fees_paid']:,.2f}\")
-print(f\"  Open Positions       : {s['open_positions']}\")
-"
+echo " PAPER LEDGER (data/paper_core.db)"
+cd "$SCRIPT_DIR" && "$PYTHON_BIN" paper_trader.py --status
 
 echo "------------------------------------------------------------------"
 echo " LAST 8 LOG LINES:"

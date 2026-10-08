@@ -105,8 +105,19 @@ def fetch_ohlcv_ccxt(
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
 
-    df.to_csv(file_path)
-    print(f"[+] Download complete: {len(df)} bars saved to {file_path}")
+    # Merge into the existing cache instead of overwriting it, so a short live fetch
+    # (e.g. 120 bars) never wipes the longer history used for training.
+    to_save = df
+    if file_path.exists():
+        try:
+            old = pd.read_csv(file_path, index_col=0, parse_dates=True)
+            old.index = pd.to_datetime(old.index, utc=True)
+            to_save = pd.concat([old, df])
+            to_save = to_save[~to_save.index.duplicated(keep="last")].sort_index()
+        except Exception:
+            to_save = df
+    to_save.to_csv(file_path)
+    print(f"[+] Download complete: {len(df)} new bars, {len(to_save)} cached at {file_path}")
     return df.tail(total_bars)
 
 

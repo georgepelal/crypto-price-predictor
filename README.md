@@ -1,5 +1,35 @@
 # Crypto ML Price Predictor
 
+> **Start here (2026-10-08):** the maintained pipeline is the **core pipeline** in `src/core/`.
+> Everything below the "Legacy" divider describes the earlier pipeline, kept for reference.
+> Agents: read `AGENTS.md`. Results and decisions: `docs/RESEARCH_LOG.md`.
+
+## Core pipeline — quickstart
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # once
+
+.venv/bin/python -m unittest tests.test_core tests.test_pipeline    # tests
+.venv/bin/python research.py            # walk-forward research on ~7y of BTC/ETH/SOL 1h data (downloads + caches)
+.venv/bin/python train.py               # train the production model on all history
+.venv/bin/python paper_trader.py --once # one live paper decision now
+./run_live_2weeks.sh                    # run the paper trader in the background (stop: ./stop_live_2weeks.sh)
+./check_status.sh                       # daemon status + paper ledger
+```
+
+What it does: downloads real Binance data into an append-only cache, builds 65 lookahead-free features,
+trains one LightGBM model pooled across coins, evaluates it walk-forward (retrain monthly, never tuned on
+test data) against buy & hold and momentum with costs and funding, and paper-trades the result hourly
+using exactly the same code path.
+
+Honest status: the model predicts direction better than chance consistently (1h AUC ≈ 0.556 out of
+sample), but after trading costs the edge is small and appears mainly in high-volatility periods.
+It is a research/paper-trading system, not a proven money-maker. See `docs/RESEARCH_LOG.md`.
+
+---
+
+# Legacy pipeline (before 2026-10-08)
+
 An institutional-grade Quantitative Machine Learning pipeline for cryptocurrency price movement forecasting and strategy backtesting, powered by **Technical Analysis**, **Perpetual Derivatives (Funding Rates & Open Interest)**, **Crypto Fear & Greed Sentiment**, and **Meta-Labeling with Dynamic Bet Sizing (Marcos López de Prado)**.
 
 ---
