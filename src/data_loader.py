@@ -34,10 +34,19 @@ def fetch_ohlcv_ccxt(
 
     # Check cache if not forced
     if not force_download and file_path.exists():
-        print(f"[*] Loading cached OHLCV data from: {file_path}")
-        df = pd.read_csv(file_path, index_col=0, parse_dates=True)
-        if len(df) >= total_bars:
-            return df.tail(total_bars)
+        try:
+            df = pd.read_csv(file_path, index_col=0, parse_dates=True)
+            if len(df) >= total_bars and not df.empty:
+                last_dt = df.index[-1]
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.tz_localize("UTC")
+                now_dt = datetime.now(timezone.utc)
+                tf_secs = 3600 if timeframe == "1h" else (900 if timeframe == "15m" else 86400)
+                if (now_dt - last_dt).total_seconds() < tf_secs * 1.5:
+                    print(f"[*] Loading fresh cached OHLCV data from: {file_path}")
+                    return df.tail(total_bars)
+        except Exception:
+            pass
 
     print(f"[*] Fetching {total_bars} bars for {symbol} ({timeframe}) from {exchange_name}...")
 
@@ -125,9 +134,18 @@ def fetch_derivatives_data(
     file_path = Path(cache_dir) / file_name
 
     if not force_download and file_path.exists():
-        print(f"[*] Loading cached derivatives data from: {file_path}")
-        df = pd.read_csv(file_path, index_col=0, parse_dates=True)
-        return df
+        try:
+            df = pd.read_csv(file_path, index_col=0, parse_dates=True)
+            if not df.empty:
+                last_dt = df.index[-1]
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.tz_localize("UTC")
+                now_dt = datetime.now(timezone.utc)
+                if (now_dt - last_dt).total_seconds() < 7200:
+                    print(f"[*] Loading fresh cached derivatives data from: {file_path}")
+                    return df
+        except Exception:
+            pass
 
     base_coin = symbol.split("/")[0]
     swap_symbol = f"{base_coin}/USDT:USDT" if ":" not in symbol else symbol

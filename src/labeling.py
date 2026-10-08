@@ -66,57 +66,78 @@ def apply_triple_barrier_labeling(
     profit_mult: float = 1.5,
     stop_mult: float = 1.0,
 ) -> pd.DataFrame:
-    """Triple Barrier Method labeling:
+    """Triple Barrier Method labeling (Marcos Lopez de Prado):
     1. Upper barrier (Take Profit): Close_t * (1 + profit_mult * ATR)
     2. Lower barrier (Stop Loss): Close_t * (1 - stop_mult * ATR)
     3. Vertical barrier: Horizon of H bars.
 
     Returns:
-        DataFrame with 'target' column (2=Up hit first, 0=Down hit first, 1=Time barrier hit).
+        DataFrame with 'target', 'fwd_return', 't1', 'tp_dist', and 'sl_dist' columns.
     """
     out = df.copy()
     close = out["close"].values
     high = out["high"].values
     low = out["low"].values
     atr = out["norm_atr"].values if "norm_atr" in out.columns else np.full(len(out), 0.01)
+    timestamps = out.index
 
     n = len(out)
     targets = np.full(n, 1, dtype=int)
     returns = np.zeros(n)
+    t1_list = [None] * n
+    tp_dists = np.zeros(n)
+    sl_dists = np.zeros(n)
 
     for i in range(n - horizon_bars):
         c_i = close[i]
-        curr_atr = atr[i] if not np.isnan(atr[i]) else 0.01
+        curr_atr = atr[i] if not np.isnan(atr[i]) and atr[i] > 0 else 0.01
 
         upper_barrier = c_i * (1.0 + (profit_mult * curr_atr))
         lower_barrier = c_i * (1.0 - (stop_mult * curr_atr))
+        tp_dists[i] = profit_mult * curr_atr
+        sl_dists[i] = stop_mult * curr_atr
 
         hit = 1
         ret_val = 0.0
+        hit_ts = timestamps[i + horizon_bars]
+
         for step in range(1, horizon_bars + 1):
             idx = i + step
             h_val = high[idx]
             l_val = low[idx]
 
-            if h_val >= upper_barrier:
+            # In case of dual touch in same bar, conservative assumption: stop loss hit first
+            if l_val <= lower_barrier and h_val >= upper_barrier:
+                hit = 0
+                ret_val = np.log(lower_barrier / c_i)
+                hit_ts = timestamps[idx]
+                break
+            elif h_val >= upper_barrier:
                 hit = 2  # profit barrier hit
                 ret_val = np.log(upper_barrier / c_i)
+                hit_ts = timestamps[idx]
                 break
             elif l_val <= lower_barrier:
                 hit = 0  # stop loss barrier hit
                 ret_val = np.log(lower_barrier / c_i)
+                hit_ts = timestamps[idx]
                 break
 
         if hit == 1:
-            # End of horizon
+            # End of horizon (timeout / vertical barrier)
             ret_val = np.log(close[i + horizon_bars] / c_i)
+            hit_ts = timestamps[i + horizon_bars]
 
         targets[i] = hit
         returns[i] = ret_val
+        t1_list[i] = hit_ts
 
     # Mask trailing horizon bars
     targets[-horizon_bars:] = -1
     out["target"] = targets
     out["fwd_return"] = returns
+    out["t1"] = pd.Series(t1_list, index=out.index)
+    out["tp_dist"] = tp_dists
+    out["sl_dist"] = sl_dists
 
     return out

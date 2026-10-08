@@ -9,7 +9,7 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.metrics import accuracy_score, classification_report, log_loss
 import joblib
 
@@ -30,13 +30,14 @@ def get_model_instance(model_type: str = "auto", random_state: int = 42, **kwarg
             n_jobs=-1,
         )
         m3 = make_pipeline(
-            StandardScaler(),
-            LogisticRegression(max_iter=400, C=1.0, random_state=random_state),
+            RobustScaler(),
+            LogisticRegression(max_iter=500, C=kwargs.get("lr_c", 0.5), random_state=random_state),
         )
+        weights = kwargs.get("ensemble_weights", [0.50, 0.30, 0.20])
         ens = VotingClassifier(
             estimators=[("hgb", m1), ("rf", m2), ("lr", m3)],
             voting="soft",
-            weights=[0.50, 0.30, 0.20],
+            weights=weights,
         )
         return ens, "Heterogeneous Ensemble (HGB+RF+LR)"
 
@@ -90,6 +91,47 @@ class WalkForwardValidator:
             yield train_idx, test_idx
 
 
+class PurgedWalkForwardValidator:
+    """Purged and Embargoed Expanding-Window Walk-Forward validator (Marcos Lopez de Prado).
+
+    Purges training observations whose forward horizon overlaps with the out-of-sample
+    test set, eliminating information leakage in multi-bar holding strategies.
+    """
+
+    def __init__(
+        self,
+        n_splits: int = 5,
+        min_train_size: int = 500,
+        purge_bars: int = 6,
+        embargo_pct: float = 0.01,
+    ):
+        self.n_splits = n_splits
+        self.min_train_size = min_train_size
+        self.purge_bars = purge_bars
+        self.embargo_pct = embargo_pct
+
+    def split(self, n_samples: int):
+        """Yield purged (train_indices, test_indices) tuples."""
+        if n_samples <= self.min_train_size:
+            raise ValueError(f"Sample size ({n_samples}) must exceed min_train_size ({self.min_train_size})")
+
+        available_for_test = n_samples - self.min_train_size
+        test_size = available_for_test // self.n_splits
+        embargo_bars = max(1, int(n_samples * self.embargo_pct))
+        total_purge = self.purge_bars + embargo_bars
+
+        for fold in range(self.n_splits):
+            raw_train_end = self.min_train_size + (fold * test_size)
+            test_start = raw_train_end
+            test_end = test_start + test_size if fold < self.n_splits - 1 else n_samples
+
+            # Purge the trailing buffer from train set so no label overlaps into test_start
+            effective_train_end = max(self.min_train_size // 2, raw_train_end - total_purge)
+            train_idx = np.arange(0, effective_train_end)
+            test_idx = np.arange(test_start, test_end)
+            yield train_idx, test_idx
+
+
 def train_walk_forward(
     X: pd.DataFrame,
     y: pd.Series,
@@ -97,6 +139,9 @@ def train_walk_forward(
     min_train_size: int = 500,
     model_type: str = "auto",
     calibrate_probabilities: bool = True,
+    use_purged_cv: bool = False,
+    purge_bars: int = 6,
+    embargo_pct: float = 0.01,
     **model_params,
 ) -> Dict[str, Any]:
     """Train and evaluate model strictly using Walk-Forward Cross Validation.
@@ -104,7 +149,15 @@ def train_walk_forward(
     Returns:
         dict containing out-of-sample predictions, probabilities, metrics, and trained final model.
     """
-    validator = WalkForwardValidator(n_splits=n_splits, min_train_size=min_train_size)
+    if use_purged_cv:
+        validator = PurgedWalkForwardValidator(
+            n_splits=n_splits,
+            min_train_size=min_train_size,
+            purge_bars=purge_bars,
+            embargo_pct=embargo_pct,
+        )
+    else:
+        validator = WalkForwardValidator(n_splits=n_splits, min_train_size=min_train_size)
 
     n_samples = len(X)
     classes = np.unique(y)
@@ -123,7 +176,7 @@ def train_walk_forward(
         X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
 
         base_model, raw_model_name = get_model_instance(model_type, **model_params)
-        if calibrate_probabilities and len(np.unique(y_train)) >= 2:
+        if calibrate_probabilities and model_type != "ensemble" and len(np.unique(y_train)) >= 2:
             from sklearn.calibration import CalibratedClassifierCV
             cv_folds = min(3, max(2, len(X_train) // 80))
             model = CalibratedClassifierCV(estimator=base_model, method="sigmoid", cv=cv_folds)

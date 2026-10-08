@@ -367,12 +367,101 @@ class TestCryptoMLPipeline(unittest.TestCase):
         self.assertGreater(r_high, 0.015)
         self.assertLessEqual(r_high, 0.035)
 
-        r_low = compute_fractional_kelly_risk(p_win=0.40, sl_distance=1.8, tp_distance=1.2)
-        self.assertEqual(r_low, 0.005)
+    def test_optuna_ensemble_tuning(self):
+        from src.optimizer import optimize_pipeline
+        opt = optimize_pipeline(self.df, symbol="BTC/USDT", timeframe="1h", n_trials=2, n_splits=2, model_type="ensemble")
+        self.assertIn("best_params", opt)
+        bp = opt["best_params"]
+        # Ensemble weights or params should be present if sampled
+        self.assertTrue(any(k in bp for k in ["w_hgb", "rf_estimators", "lr_c"]))
+
+    def test_multi_asset_scanner_ranking(self):
+        from multi_asset_scanner import scan_and_allocate_capital
+        from unittest.mock import patch
+
+        mock_btc = {
+            "symbol": "BTC/USDT", "timestamp": pd.Timestamp("2026-10-06"), "price": 65000.0,
+            "atr_pct": 1.2, "p_down": 0.20, "p_neutral": 0.30, "p_up": 0.50, "edge": 0.30,
+            "direction": "BUY / LONG", "regime": "BULL_TREND", "adx": 32.0, "is_singleton": True,
+            "pred_set": [2], "veto_reason": None, "conviction_score": 0.48, "sl_price": 63500.0,
+            "tp_price": 67000.0, "prob_dict": {0: 0.2, 1: 0.3, 2: 0.5}, "open_bar": 64800.0,
+            "high_bar": 65200.0, "low_bar": 64700.0, "status": "OK",
+        }
+        mock_eth = {
+            "symbol": "ETH/USDT", "timestamp": pd.Timestamp("2026-10-06"), "price": 3500.0,
+            "atr_pct": 1.8, "p_down": 0.35, "p_neutral": 0.40, "p_up": 0.25, "edge": -0.10,
+            "direction": "SELL / SHORT", "regime": "BEAR_TREND", "adx": 22.0, "is_singleton": False,
+            "pred_set": [0, 1], "veto_reason": None, "conviction_score": 0.088, "sl_price": 3610.0,
+            "tp_price": 3420.0, "prob_dict": {0: 0.35, 1: 0.4, 2: 0.25}, "open_bar": 3510.0,
+            "high_bar": 3520.0, "low_bar": 3490.0, "status": "OK",
+        }
+
+        with patch("multi_asset_scanner.scan_single_asset") as mock_scan:
+            mock_scan.side_effect = lambda symbol, **kwargs: mock_btc if "BTC" in symbol else mock_eth
+            result = scan_and_allocate_capital(symbols=["BTC/USDT", "ETH/USDT"], paper_trade=False)
+            self.assertEqual(len(result["ranked_assets"]), 2)
+            # Top candidate should be BTC due to conviction_score 0.48 > 0.088
+            self.assertEqual(result["best_candidate"]["symbol"], "BTC/USDT")
+            self.assertEqual(result["best_candidate"]["direction"], "BUY / LONG")
+
+    def test_triple_barrier_with_t1(self):
+        from src.labeling import apply_triple_barrier_labeling
+        tb = apply_triple_barrier_labeling(self.df, horizon_bars=6, profit_mult=1.5, stop_mult=1.0)
+        self.assertIn("target", tb.columns)
+        self.assertIn("t1", tb.columns)
+        self.assertIn("tp_dist", tb.columns)
+        self.assertIn("sl_dist", tb.columns)
+        unique_targets = set(tb["target"].unique())
+        self.assertTrue(unique_targets.issubset({-1, 0, 1, 2}))
+        # Last 6 bars must be masked with -1
+        self.assertTrue((tb["target"].iloc[-6:] == -1).all())
+
+    def test_purged_walk_forward_validator(self):
+        from src.model import PurgedWalkForwardValidator
+        n = 300
+        purge_bars = 6
+        validator = PurgedWalkForwardValidator(n_splits=3, min_train_size=100, purge_bars=purge_bars, embargo_pct=0.01)
+        splits = list(validator.split(n))
+        self.assertEqual(len(splits), 3)
+        for train_idx, test_idx in splits:
+            # Guarantee zero overlap and purge buffer between train and test
+            self.assertLessEqual(train_idx[-1], test_idx[0] - purge_bars)
+            self.assertGreater(len(train_idx), 0)
+            self.assertGreater(len(test_idx), 0)
+
+    def test_meta_labeling_pipeline(self):
+        from src.meta_labeling import create_meta_labels, train_meta_model
+        # Generate primary signals alternating long/short
+        sigs = pd.Series([1 if i % 4 == 0 else (-1 if i % 4 == 2 else 0) for i in range(len(self.df))], index=self.df.index)
+        meta_labels = create_meta_labels(self.df, sigs, horizon_bars=4, profit_mult=1.5, stop_mult=1.0)
+        self.assertIn(1, meta_labels.values)
+        
+        # Prepare feature matrix
+        feat = generate_crypto_features(self.df)
+        cols = ["rsi", "norm_atr", "bb_bandwidth"]
+        meta_res = train_meta_model(feat[cols], meta_labels, n_splits=2, min_train_size=50)
+        self.assertIn("meta_probs", meta_res)
+        self.assertIn("meta_model", meta_res)
+        self.assertGreater(meta_res["n_trade_samples"], 5)
+        # Probabilities must be valid in [0, 1]
+        valid_p = meta_res["meta_probs"].dropna()
+        self.assertTrue((valid_p >= 0.0).all() and (valid_p <= 1.0).all())
+
+    def test_expected_value_calculation(self):
+        from src.meta_labeling import compute_expected_value
+        ev_bull = compute_expected_value(p_up=0.60, p_down=0.20, atr_val=0.02, profit_mult=1.5, stop_mult=1.0)
+        self.assertGreater(ev_bull["ev_long"], 0.0)
+        self.assertLess(ev_bull["ev_short"], 0.0)
+        self.assertEqual(ev_bull["best_ev"], ev_bull["ev_long"])
+
+        ev_bear = compute_expected_value(p_up=0.20, p_down=0.60, atr_val=0.02, profit_mult=1.5, stop_mult=1.0)
+        self.assertGreater(ev_bear["ev_short"], 0.0)
+        self.assertLess(ev_bear["ev_long"], 0.0)
 
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

@@ -9,3 +9,7 @@ reports/
 models/*.pkl
 models/*.joblib
 .DS_Store
+
+logs/
+data/trader.pid
+scratch/

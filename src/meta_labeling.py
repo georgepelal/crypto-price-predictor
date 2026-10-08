@@ -17,27 +17,96 @@ from src.backtest import run_backtest
 def create_meta_labels(
     sub_df: pd.DataFrame,
     primary_signals: pd.Series,
+    horizon_bars: int = 6,
+    profit_mult: float = 1.5,
+    stop_mult: float = 1.0,
     taker_fee: float = 0.0005,
     slippage: float = 0.0002,
 ) -> pd.Series:
-    """Generate binary meta-labels (1 = profitable trade net of fees, 0 = loss)."""
+    """Generate binary meta-labels (1 = profitable trade net of fees, 0 = loss).
+
+    Simulates the actual trade path using dynamic ATR profit-taking and stop-loss barriers.
+    """
     common_idx = sub_df.index.intersection(primary_signals.index)
     aligned_df = sub_df.loc[common_idx]
     aligned_sig = primary_signals.loc[common_idx]
 
-    next_returns = aligned_df["close"].pct_change().shift(-1).fillna(0.0)
+    close = aligned_df["close"].values
+    high = aligned_df["high"].values
+    low = aligned_df["low"].values
+    atr = aligned_df["norm_atr"].values if "norm_atr" in aligned_df.columns else np.full(len(aligned_df), 0.01)
     round_trip_cost = (taker_fee + slippage) * 2.0
 
+    n = len(aligned_df)
     meta_labels = pd.Series(-1, index=aligned_df.index, dtype=int)
 
-    for i in range(len(aligned_df) - 1):
+    for i in range(n - horizon_bars):
         sig = aligned_sig.iloc[i]
-        if sig != 0.0:
-            ret = next_returns.iloc[i]
-            trade_pnl = (sig * ret) - round_trip_cost
-            meta_labels.iloc[i] = 1 if trade_pnl > 0.0 else 0
+        if sig == 0.0 or np.isnan(sig):
+            continue
+
+        c_i = close[i]
+        curr_atr = atr[i] if not np.isnan(atr[i]) and atr[i] > 0 else 0.01
+
+        tp_target = c_i * (1.0 + (profit_mult * curr_atr)) if sig > 0 else c_i * (1.0 - (profit_mult * curr_atr))
+        sl_target = c_i * (1.0 - (stop_mult * curr_atr)) if sig > 0 else c_i * (1.0 + (stop_mult * curr_atr))
+
+        is_success = 0
+        for step in range(1, horizon_bars + 1):
+            idx = i + step
+            h_val = high[idx]
+            l_val = low[idx]
+
+            if sig > 0:  # Long
+                if l_val <= sl_target:
+                    is_success = 0
+                    break
+                elif h_val >= tp_target:
+                    is_success = 1
+                    break
+            else:  # Short
+                if h_val >= sl_target:
+                    is_success = 0
+                    break
+                elif l_val <= tp_target:
+                    is_success = 1
+                    break
+
+        # If neither barrier was touched before timeout, evaluate net exit return
+        if step == horizon_bars and is_success == 0:
+            c_exit = close[i + horizon_bars]
+            exit_ret = ((c_exit / c_i) - 1.0) if sig > 0 else (1.0 - (c_exit / c_i))
+            if exit_ret - round_trip_cost > 0.0:
+                is_success = 1
+
+        meta_labels.iloc[i] = is_success
 
     return meta_labels
+
+
+def compute_expected_value(
+    p_up: float,
+    p_down: float,
+    atr_val: float,
+    profit_mult: float = 1.5,
+    stop_mult: float = 1.0,
+    round_trip_friction: float = 0.0014,
+) -> Dict[str, float]:
+    """Calculate mathematical Expected Value for Long and Short trading setups."""
+    atr_clean = max(atr_val, 0.005)
+    tp_distance = profit_mult * atr_clean
+    sl_distance = stop_mult * atr_clean
+
+    ev_long = (p_up * tp_distance) - (p_down * sl_distance) - round_trip_friction
+    ev_short = (p_down * tp_distance) - (p_up * sl_distance) - round_trip_friction
+
+    return {
+        "ev_long": float(ev_long),
+        "ev_short": float(ev_short),
+        "best_ev": float(max(ev_long, ev_short)),
+        "tp_distance": float(tp_distance),
+        "sl_distance": float(sl_distance),
+    }
 
 
 def train_meta_model(
@@ -101,10 +170,30 @@ def train_meta_model(
     valid_trades = ~oof_meta_probs.isna()
     full_meta_probs.loc[oof_meta_probs[valid_trades].index] = oof_meta_probs[valid_trades]
 
+    # Train final model on entire trade dataset for live production inference
+    final_meta_model = HistGradientBoostingClassifier(
+        max_iter=100, learning_rate=0.03, max_depth=3, random_state=42
+    )
+    if len(np.unique(y_trades)) >= 2:
+        final_meta_model.fit(X_trades, y_trades)
+    else:
+        final_meta_model = last_meta_model
+
+    # Out-of-fold diagnostic metrics
+    precision, acc = 0.5, 0.5
+    if valid_trades.sum() > 5:
+        y_eval = y_trades.loc[valid_trades]
+        p_eval = oof_meta_probs.loc[valid_trades]
+        pred_eval = (p_eval >= 0.50).astype(int)
+        precision = float(precision_score(y_eval, pred_eval, zero_division=0))
+        acc = float(accuracy_score(y_eval, pred_eval))
+
     return {
-        "meta_model": last_meta_model,
+        "meta_model": final_meta_model,
         "meta_probs": full_meta_probs,
         "n_trade_samples": n_samples,
+        "precision": precision,
+        "accuracy": acc,
     }
 
 

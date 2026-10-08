@@ -23,6 +23,14 @@ def run_backtest(
     conformal_singletons: Optional[pd.Series] = None,
     regime_probs: Optional[pd.DataFrame] = None,
     use_mtf_gate: bool = False,
+    use_ev_gate: bool = False,
+    ev_hurdle: float = 0.002,
+    meta_probabilities: Optional[pd.Series] = None,
+    meta_threshold: float = 0.55,
+    profit_mult: float = 1.5,
+    stop_mult: float = 1.0,
+    use_barrier_holding: bool = False,
+    max_holding_bars: int = 8,
     bars_per_year: int = 8760,       # 24 * 365 for hourly
 ) -> Dict[str, Any]:
     """Execute realistic trading backtest on predicted signals or custom continuous bet sizes."""
@@ -55,37 +63,98 @@ def run_backtest(
         # Optional MTF Trend Confluence
         tf4h_trend = sub_df["tf4h_trend_ratio"].values if ("tf4h_trend_ratio" in sub_df.columns and use_mtf_gate) else None
 
+        # Optional Meta-Model Probabilities
+        meta_p = meta_probabilities.reindex(sub_df.index).fillna(0.5).values if meta_probabilities is not None else None
+
+        # ATR for dynamic EV calculation
+        atr_vals = sub_df["norm_atr"].values if "norm_atr" in sub_df.columns else np.full(n, 0.01)
+        round_trip_friction = (taker_fee + slippage) * 2.0
+
+        active_pos = 0.0
+        tp_target = 0.0
+        sl_target = 0.0
+        holding_bars = 0
+
         for i in range(n):
-            # 1. Chop Veto: High-volatility mean-reverting chop
-            if prob_chop is not None and prob_chop[i] >= 0.40:
-                signals[i] = 0.0
-                continue
+            c_i = float(sub_df["close"].iloc[i])
+            h_i = float(sub_df["high"].iloc[i]) if "high" in sub_df.columns else c_i
+            l_i = float(sub_df["low"].iloc[i]) if "low" in sub_df.columns else c_i
 
-            # 2. Conformal Singleton Filter: Reject ambiguous multi-class predictions
-            if singletons is not None and singletons[i] == -1:
-                signals[i] = 0.0
-                continue
+            # 0. Check active position barrier resolution
+            if active_pos != 0.0 and use_barrier_holding:
+                holding_bars += 1
+                if active_pos > 0:  # Long
+                    if l_i <= sl_target or h_i >= tp_target or holding_bars >= max_holding_bars:
+                        active_pos = 0.0
+                        holding_bars = 0
+                elif active_pos < 0:  # Short
+                    if h_i >= sl_target or l_i <= tp_target or holding_bars >= max_holding_bars:
+                        active_pos = 0.0
+                        holding_bars = 0
 
-            # 3. Long Condition: Positive Edge + Conformal UP (if available) + 4h Uptrend (if gated)
-            is_long = (edge[i] >= edge_threshold)
-            if singletons is not None:
-                is_long = is_long and (singletons[i] == 2)
-            if tf4h_trend is not None:
-                is_long = is_long and (tf4h_trend[i] > 0)
+            # If flat (or barrier holding disabled), evaluate new signals
+            if active_pos == 0.0 or not use_barrier_holding:
+                # 1. Chop Veto: High-volatility mean-reverting chop
+                if prob_chop is not None and prob_chop[i] >= 0.40:
+                    signals[i] = 0.0
+                    continue
 
-            # 4. Short Condition: Negative Edge + Conformal DOWN + 4h Downtrend
-            is_short = (edge[i] <= -edge_threshold) and allow_short
-            if singletons is not None:
-                is_short = is_short and (singletons[i] == 0)
-            if tf4h_trend is not None:
-                is_short = is_short and (tf4h_trend[i] < 0)
+                # 2. Conformal Singleton Filter: Reject ambiguous multi-class predictions
+                if singletons is not None and singletons[i] == -1:
+                    signals[i] = 0.0
+                    continue
 
-            if is_long:
-                signals[i] = 1.0
-            elif is_short:
-                signals[i] = -1.0
+                # 3. Base Directional Edge
+                is_long = (edge[i] >= edge_threshold)
+                is_short = (edge[i] <= -edge_threshold) and allow_short
+
+                if singletons is not None:
+                    is_long = is_long and (singletons[i] == 2)
+                    is_short = is_short and (singletons[i] == 0)
+
+                if tf4h_trend is not None:
+                    is_long = is_long and (tf4h_trend[i] > 0)
+                    is_short = is_short and (tf4h_trend[i] < 0)
+
+                # 4. Expected Value (EV) Filter: Positive Mathematical Expectancy
+                if use_ev_gate:
+                    curr_atr = max(atr_vals[i], 0.005) if not np.isnan(atr_vals[i]) else 0.01
+                    ev_l = (p_up[i] * profit_mult * curr_atr) - (p_down[i] * stop_mult * curr_atr) - round_trip_friction
+                    ev_s = (p_down[i] * profit_mult * curr_atr) - (p_up[i] * stop_mult * curr_atr) - round_trip_friction
+
+                    if is_long and ev_l < ev_hurdle:
+                        is_long = False
+                    if is_short and ev_s < ev_hurdle:
+                        is_short = False
+
+                # 5. Meta-Labeling Precision Filter: Veto trade if probability of success < threshold
+                if meta_p is not None and (is_long or is_short):
+                    if meta_p[i] < meta_threshold:
+                        is_long = False
+                        is_short = False
+
+                if use_barrier_holding:
+                    curr_atr = max(atr_vals[i], 0.005) if not np.isnan(atr_vals[i]) else 0.01
+                    if is_long:
+                        active_pos = 1.0
+                        tp_target = c_i * (1.0 + (profit_mult * curr_atr))
+                        sl_target = c_i * (1.0 - (stop_mult * curr_atr))
+                        holding_bars = 0
+                    elif is_short:
+                        active_pos = -1.0
+                        tp_target = c_i * (1.0 - (profit_mult * curr_atr))
+                        sl_target = c_i * (1.0 + (stop_mult * curr_atr))
+                        holding_bars = 0
+                    signals[i] = active_pos
+                else:
+                    if is_long:
+                        signals[i] = 1.0
+                    elif is_short:
+                        signals[i] = -1.0
+                    else:
+                        signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                signals[i] = active_pos
 
         sub_df["signal"] = signals
         sub_df["edge"] = edge

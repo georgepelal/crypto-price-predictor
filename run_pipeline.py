@@ -51,6 +51,15 @@ def main():
     parser.add_argument("--use-mtf-gate", action="store_true", help="Enforce hard structural Multi-Timeframe trend gating")
     parser.add_argument("--use-cross-asset", action="store_true", help="Enable Cross-Asset Lead-Lag features (ETH/BTC ratio & beta)")
     parser.add_argument("--model-type", type=str, default="auto", choices=["auto", "ensemble", "lightgbm", "hist"], help="Classifier architecture (auto, ensemble, lightgbm, hist)")
+    parser.add_argument("--use-triple-barrier", action="store_true", help="Enable Dynamic Triple Barrier Method labeling (take profit, stop loss, time horizon)")
+    parser.add_argument("--tb-horizon", type=int, default=6, help="Triple barrier max holding horizon in bars (default: 6)")
+    parser.add_argument("--tb-profit-mult", type=float, default=1.5, help="Triple barrier profit-take ATR multiplier (default: 1.5)")
+    parser.add_argument("--tb-stop-mult", type=float, default=1.0, help="Triple barrier stop-loss ATR multiplier (default: 1.0)")
+    parser.add_argument("--use-purged-cv", action="store_true", help="Enable Purged & Embargoed Walk-Forward CV (eliminates label overlap leakage)")
+    parser.add_argument("--use-meta-labeling", action="store_true", help="Enable Secondary Meta-Model (predicts trade success and vetoes false breakouts)")
+    parser.add_argument("--meta-threshold", type=float, default=0.55, help="Minimum probability of trade success required by Meta-Model (default: 0.55)")
+    parser.add_argument("--use-ev-filter", action="store_true", help="Filter trades using mathematical Expected Value (EV)")
+    parser.add_argument("--ev-hurdle", type=float, default=0.002, help="Minimum Expected Value per trade (default: 0.002 = +0.20% net)")
     args = parser.parse_args()
 
     # Load default configuration
@@ -159,6 +168,7 @@ def main():
     max_depth = model_cfg.get("max_depth", 5)
     learning_rate = model_cfg.get("learning_rate", 0.03)
     max_iter = model_cfg.get("max_iter", 200)
+    extra_model_params = {}
 
     if args.optimize:
         from src.optimizer import optimize_pipeline
@@ -168,6 +178,7 @@ def main():
             timeframe=timeframe,
             n_trials=args.trials,
             n_splits=model_cfg.get("n_splits", 5),
+            model_type=args.model_type if args.model_type != "auto" else model_cfg.get("type", "auto"),
         )
         best = opt_results["best_params"]
         atr_mult = best.get("atr_multiplier", atr_mult)
@@ -175,21 +186,39 @@ def main():
         learning_rate = best.get("learning_rate", learning_rate)
         max_iter = best.get("max_iter", max_iter)
         confidence = best.get("confidence_threshold", confidence)
+        if "w_hgb" in best:
+            w_sum = best["w_hgb"] + best["w_rf"] + best["w_lr"]
+            extra_model_params["ensemble_weights"] = [best["w_hgb"] / w_sum, best["w_rf"] / w_sum, best["w_lr"] / w_sum]
+        if "rf_estimators" in best:
+            extra_model_params["rf_estimators"] = best["rf_estimators"]
+        if "lr_c" in best:
+            extra_model_params["lr_c"] = best["lr_c"]
         print(f"[*] Training pipeline with optimized settings (ATR={atr_mult:.2f}, Confidence={confidence:.2f}, Depth={max_depth}, LR={learning_rate:.4f})")
 
+
     # 3. Target Labeling
-    print("[*] Generating volatility-buffered directional labels...")
-    labeled_df = make_directional_labels(
-        feat_df,
-        forward_bars=label_cfg.get("forward_bars", 1),
-        atr_multiplier=atr_mult,
-        fee_buffer=label_cfg.get("fee_buffer", 0.0005),
-    )
+    if args.use_triple_barrier:
+        from src.labeling import apply_triple_barrier_labeling
+        print(f"[*] Generating Dynamic Triple Barrier labels (Horizon={args.tb_horizon}h, Profit={args.tb_profit_mult}x ATR, Stop={args.tb_stop_mult}x ATR)...")
+        labeled_df = apply_triple_barrier_labeling(
+            feat_df,
+            horizon_bars=args.tb_horizon,
+            profit_mult=args.tb_profit_mult,
+            stop_mult=args.tb_stop_mult,
+        )
+    else:
+        print("[*] Generating volatility-buffered directional labels...")
+        labeled_df = make_directional_labels(
+            feat_df,
+            forward_bars=label_cfg.get("forward_bars", 1),
+            atr_multiplier=atr_mult,
+            fee_buffer=label_cfg.get("fee_buffer", 0.0005),
+        )
 
     # Clean missing values resulting from rolling indicators and target shifting
     feature_cols = [
         c for c in labeled_df.columns
-        if c not in ["open", "high", "low", "close", "volume", "target", "fwd_return", "threshold"]
+        if c not in ["open", "high", "low", "close", "volume", "target", "fwd_return", "threshold", "t1", "tp_dist", "sl_dist"]
     ]
 
     # Filter out unlabelled trailing rows (-1) and drop NaNs
@@ -216,6 +245,11 @@ def main():
     configured_min_train = model_cfg.get("min_train_size", 500)
     effective_min_train = min(configured_min_train, max(100, int(len(X) * 0.4)))
 
+    use_purged = args.use_purged_cv or args.use_triple_barrier
+    purge_bars = args.tb_horizon if args.use_triple_barrier else 6
+    if use_purged:
+        print(f"[*] Activating Purged & Embargoed Cross-Validation (Purge Window: {purge_bars} bars, Embargo: 1%)...")
+
     train_results = train_walk_forward(
         X,
         y,
@@ -225,10 +259,38 @@ def main():
         max_depth=max_depth,
         learning_rate=learning_rate,
         max_iter=max_iter,
+        use_purged_cv=use_purged,
+        purge_bars=purge_bars,
+        **extra_model_params,
     )
 
     print(f"[+] Validation complete using {train_results['model_name']}.")
     print(f"[+] Out-of-Sample Accuracy: {train_results['overall_accuracy']:.2%}")
+
+    # Meta-Model Training
+    meta_model = None
+    meta_probs = None
+    if args.use_meta_labeling:
+        from src.meta_labeling import create_meta_labels, train_meta_model
+        print(f"[*] Training Secondary Meta-Model (Trade Success Filter, Threshold >= {args.meta_threshold:.2%})...")
+        primary_sigs = pd.Series(0.0, index=valid_data.index)
+        p_up = train_results["oof_probs"]["prob_class_2"].fillna(0.0)
+        p_down = train_results["oof_probs"]["prob_class_0"].fillna(0.0)
+        edge_series = p_up - p_down
+        primary_sigs[edge_series >= args.edge_threshold] = 1.0
+        primary_sigs[edge_series <= -args.edge_threshold] = -1.0
+
+        meta_labels = create_meta_labels(
+            valid_data,
+            primary_sigs,
+            horizon_bars=args.tb_horizon if args.use_triple_barrier else 6,
+            profit_mult=args.tb_profit_mult if args.use_triple_barrier else 1.5,
+            stop_mult=args.tb_stop_mult if args.use_triple_barrier else 1.0,
+        )
+        meta_results = train_meta_model(X, meta_labels, n_splits=model_cfg.get("n_splits", 5))
+        meta_probs = meta_results["meta_probs"]
+        meta_model = meta_results.get("meta_model")
+        print(f"[+] Meta-Model active: {meta_results['n_trade_samples']} sample trades. OOF Win Precision: {meta_results['precision']:.2%}")
 
     # 5. Backtest Strategy with Precision Filters
     conformal_singletons = None
@@ -268,6 +330,14 @@ def main():
         conformal_singletons=conformal_singletons,
         regime_probs=regime_probs,
         use_mtf_gate=args.use_mtf_gate,
+        use_ev_gate=args.use_ev_filter,
+        ev_hurdle=args.ev_hurdle,
+        meta_probabilities=meta_probs,
+        meta_threshold=args.meta_threshold,
+        profit_mult=args.tb_profit_mult if args.use_triple_barrier else 1.5,
+        stop_mult=args.tb_stop_mult if args.use_triple_barrier else 1.0,
+        use_barrier_holding=args.use_triple_barrier,
+        max_holding_bars=args.tb_horizon,
         bars_per_year=8760 if timeframe == "1h" else 35040,
     )
 
@@ -293,9 +363,24 @@ def main():
     joblib.dump(
         {
             "model": train_results["final_model"],
+            "meta_model": meta_model,
             "model_name": train_results["model_name"],
             "feature_cols": feature_cols,
             "metrics": bt_results["metrics"],
+            "tb_params": {
+                "use_triple_barrier": args.use_triple_barrier,
+                "horizon_bars": args.tb_horizon,
+                "profit_mult": args.tb_profit_mult,
+                "stop_mult": args.tb_stop_mult,
+            },
+            "meta_params": {
+                "use_meta_labeling": args.use_meta_labeling,
+                "meta_threshold": args.meta_threshold,
+            },
+            "ev_params": {
+                "use_ev_filter": args.use_ev_filter,
+                "ev_hurdle": args.ev_hurdle,
+            },
         },
         model_save_path,
     )
