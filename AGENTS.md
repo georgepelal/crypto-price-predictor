@@ -34,7 +34,7 @@ Research results and decisions go in `docs/RESEARCH_LOG.md`.
 | `src/core/strategy.py` | Positions, costs, funding; `step_position()` = cost-aware rule shared by backtest and live. |
 | `src/core/metrics.py` | AUC, log-loss skill, monthly IC, Sharpe with block-bootstrap CI. |
 | `src/core/deploy.py` | `DEFAULT_SPEC` (what is deployed), `train_final()`, `latest_signals()`. |
-| `research.py` | Full walk-forward grid + baselines → `reports/research/<run>/summary.md`, `equity.png`. `--reuse` resumes from cached OOS predictions. |
+| `research.py` | Full walk-forward grid + baselines → `reports/research/<run>/summary.md`, `equity.png`. `--universe u3/u20`, `--primary model:h:policy`, `--reuse` + `--max-minutes` to run long grids in resumable chunks (memory: U20 needs ~2.5 GB). |
 | `train.py` | Train the production model on all history → `models/core_lgbm_1h_h1.joblib` (+ `.json` metadata). |
 | `paper_trader.py` | Hourly paper trader (no real orders) → `data/paper_core.db`. `--once`, `--status`. Retrains itself every 30 days. |
 | `run_live_2weeks.sh` / `stop_live_2weeks.sh` / `check_status.sh` | Background daemon for `paper_trader.py` (macOS `caffeinate`), log in `logs/live_trader.log`. |
@@ -56,10 +56,14 @@ Research results and decisions go in `docs/RESEARCH_LOG.md`.
 - Deployed to paper: **lgbm, 1h horizon, cost-aware long/flat** on BTC/ETH/SOL.
 - Out-of-sample 2023-01 → 2026-10: real predictive skill (AUC 0.557, IC t≈15) but the tradeable edge
   after costs is small and episodic. Details and caveats: `docs/RESEARCH_LOG.md`.
-- Next: let the paper trader run ≥ 4 weeks and compare live fills vs backtest before any changes.
+- 2026-10-10: experiment 2 (20 coins) passed its pre-declared test (Sharpe +1.85, CI [+0.97, +2.80]) but the
+  edge has been ~flat since 2025-01. Proposed to Giorgos: switch the paper trader to the 20-coin model.
+- Paper trader running on Giorgos's Mac since 2026-10-10 09:43 UTC (3 coins). Live `signals.live_price` vs
+  `bar_close_price` measures real latency slippage.
 
 ## Change log
 - 2026-10-08 · Claude (Cowork) · Reviewed repo, ran tests, created this file.
+- 2026-10-10 · Claude (Cowork) · Experiment 2 (20-coin universe, pre-declared): passed. Added `research.py --universe u20 --primary ... --max-minutes` (resumable, fold cache in `--out`), funding symbol overrides (1000SHIB), float32 datasets, equal weight across listed coins, `scripts/exp2_checks.py`, `scripts/exp2_latency.py`. Paper trader NOT changed yet (awaiting Giorgos).
 - 2026-10-10 · Claude (Cowork) · Fixed lost exec bit on run_live_2weeks.sh, added env pre-flight check (macOS needs `brew install libomp` for LightGBM), silenced urllib3 LibreSSL warning.
 - 2026-10-08 · Claude (Cowork) · Baseline commit of Antigravity's uncommitted work (branch `honest-ml`).
   Added core pipeline (`src/core/`, `research.py`, `train.py`, `paper_trader.py`, `tests/test_core.py`,

@@ -104,6 +104,24 @@ class TestWalkForwardPurge(unittest.TestCase):
             self.assertLessEqual(train_max + pd.Timedelta(hours=h + 1), test_start + pd.Timedelta(hours=1))
 
 
+class TestWalkForwardResume(unittest.TestCase):
+    def test_fold_cache_resume_gives_identical_predictions(self):
+        import tempfile
+        o, m = synthetic_ohlcv(3000), synthetic_ohlcv(3000, seed=1)
+        data = {"ohlcv": {"BTC/USDT": m, "ETH/USDT": o}, "funding": {}, "fng": None}
+        ds = build_dataset(data, ["BTC/USDT", "ETH/USDT"], horizon=1, float32=True)
+        feats = model_features(ds)
+        start = str(ds.timestamp.iloc[len(ds) // 2].date())
+        full = wf_mod.walk_forward(ds, feats, 1, "logreg", test_start=start, retrain_every="10D", verbose=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(wf_mod.TimeBudgetExceeded):
+                wf_mod.walk_forward(ds, feats, 1, "logreg", test_start=start, retrain_every="10D",
+                                    verbose=False, fold_cache=tmp, max_seconds=0.0)
+            resumed = wf_mod.walk_forward(ds, feats, 1, "logreg", test_start=start, retrain_every="10D",
+                                          verbose=False, fold_cache=tmp)
+        pd.testing.assert_frame_equal(full.reset_index(drop=True), resumed.reset_index(drop=True))
+
+
 class TestStrategy(unittest.TestCase):
     def test_position_earns_next_bar_and_pays_costs(self):
         idx = pd.date_range("2024-01-01", periods=4, freq="1h", tz="UTC")

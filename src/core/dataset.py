@@ -34,7 +34,7 @@ def build_symbol_features(data: dict, symbol: str, timeframe: str = "1h") -> pd.
 
 
 def build_dataset(data: dict, symbols: List[str], horizon: int, timeframe: str = "1h",
-                  start: Optional[str] = None) -> pd.DataFrame:
+                  start: Optional[str] = None, float32: bool = False) -> pd.DataFrame:
     """Long table with columns [timestamp, symbol, <features>, _close, fwd_ret, ret_next, target]."""
     frames = []
     for sym in symbols:
@@ -43,6 +43,9 @@ def build_dataset(data: dict, symbols: List[str], horizon: int, timeframe: str =
         f = add_targets(f, horizon)
         if start is not None:
             f = f[f.index >= pd.Timestamp(start, tz="UTC")]
+        if float32:
+            num = [c for c in f.columns if c not in ("fwd_ret", "ret_next", "_close")]
+            f[num] = f[num].astype("float32")
         f["symbol"] = sym
         frames.append(f)
     ds = pd.concat(frames).rename_axis("timestamp").reset_index()

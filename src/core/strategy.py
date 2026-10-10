@@ -72,8 +72,9 @@ def run_portfolio(
         frame = g.set_index("timestamp").sort_index()
         fh = hourly_funding((funding or {}).get(sym), frame.index)
         per_symbol[sym] = simulate_symbol(frame, positions[sym], cost_per_side, fh)
-    nets = pd.DataFrame({s: d["net"] for s, d in per_symbol.items()}).fillna(0.0)
-    port = nets.mean(axis=1)
+    # Equal weight across the coins that exist at each hour (delisted / not-yet-listed coins drop out).
+    nets = pd.DataFrame({s: d["net"] for s, d in per_symbol.items()})
+    port = nets.mean(axis=1, skipna=True).fillna(0.0)
     return {"per_symbol": per_symbol, "portfolio": port}
 
 

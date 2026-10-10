@@ -28,8 +28,8 @@ def make_model(name: str, random_state: int = 42) -> Any:
         )
     if name == "logreg":
         return make_pipeline(
-            SimpleImputer(strategy="median"),
-            StandardScaler(),
+            SimpleImputer(strategy="median", copy=False),
+            StandardScaler(copy=False),
             LogisticRegression(C=0.01, max_iter=2000),
         )
     raise ValueError(f"unknown model {name!r}; choose lgbm or logreg")

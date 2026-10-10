@@ -33,6 +33,37 @@ vs v1's +1.46 (does training on more coins help?); (b) logistic regression on U2
 **Decision rule.** Pass → propose moving the paper trader to U20. Fail → keep the 3-coin paper trader
 as is, record the failure here, and do not try variations of this universe until a new hypothesis is written down.
 
+### Results (added after running, same day) — **PASS on all three pre-declared criteria**
+
+Report: `reports/research/exp2-u20/summary.md`, checks: `reports/research/exp2-u20/checks.txt`
+(`scripts/exp2_checks.py`), latency sample: `scripts/exp2_latency.py`.
+
+| | Net Sharpe [95% CI] | Return | Max DD | Criterion |
+|---|---|---|---|---|
+| **Primary: lgbm h1 cost_lf, U20** | **+1.85 [+0.97, +2.80]** | +160% | −8.8% | 1 ✅ (CI > 0) |
+| Calendar years | 2023 +26.5%, 2024 +101.3%, 2025 −1.6%, 2026 YTD +3.7% | | | 2 ✅ (3 of 4 positive) |
+| Same at 10 bps/side | +2.53 | +136% | −4.6% | 3 ✅ (> 0.5) |
+| Secondary (a): U20-trained model, BTC/ETH/SOL only | +2.23 [+1.33, +3.09] | +153% | −8.1% | vs v1 +1.46 → more training coins helps |
+| Secondary (b): logreg h1 cost_lf, U20 | +1.60 [+0.65, +2.68] | +121% | −14.2% | same picture with a linear model |
+| lgbm h1 cost_ls (long/short), U20 | +1.45 [+0.69, +2.26] | +138% | −14.7% | |
+| Buy & hold U20 | +0.57 [−0.47, +1.55] | +84% | −71% | |
+
+Robustness checks:
+* 6,426 trades, avg hold 3.9 h, avg gross +43 bps, net +29 bps, 68% winners. Top 1% of trades = 25% of P&L.
+* Acting one full bar (1 h) late: Sharpe +1.26 (v1 3-coin version collapsed to +0.43).
+* Latency (400 random entries, 1-minute klines): price moves **+6 bps against us within 1 minute** of the
+  close (0 bps at the first trade after the close). The live bot acts ~20 s after the close, so expect
+  ~2–6 bps extra cost per entry. The 10 bps/side sensitivity covers this.
+
+**Big caveat — the edge has been flat for ~20 months.** Almost all profit came 2023-01 → 2025-01. Net per trade
+by year: 2023 +34 bps, 2024 +42, **2025 −1**, 2026 +21 (only 308 trades). 2025 had as many trades as 2023 but
+the gross edge per trade fell from ~50 to 13 bps. Either the short-term reversal effect has been competed away,
+or it only pays in high-volatility regimes. The paper trader is the test of which.
+
+**Decision:** criteria passed → propose to Giorgos switching the paper trader to the U20-trained model trading
+the 18 still-listed U20 coins (MATIC and XMR can no longer be traded). ~8 trades/week at 2026 volatility (up to ~30 in volatile years) instead of ~1–2, so 4 weeks
+of paper trading becomes informative. Not deployed until he agrees (it resets the paper ledger).
+
 ---
 
 ## 2026-10-08 — Core pipeline v1 (Claude)

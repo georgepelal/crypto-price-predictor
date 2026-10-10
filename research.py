@@ -14,6 +14,8 @@ selection bias if you pick the best one.
 
 import argparse
 import json
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,17 +26,32 @@ from src.core import history
 from src.core.dataset import build_dataset, model_features
 from src.core.metrics import classification_metrics, information_coefficient, trading_metrics, yearly_returns
 from src.core.strategy import baseline_positions, policy_positions, run_portfolio
-from src.core.walkforward import walk_forward
+from src.core.walkforward import TimeBudgetExceeded, walk_forward
 
 # v1 primary (fixed before the first run, 2026-10-08): naive overlapping rule -> failed after costs.
 # v2 primary (fixed before running the cost-aware rule): same model & horizon, cost-aware decision rule.
 PRIMARY = {"model": "lgbm", "horizon": 24, "policy": "cost_ls"}
 SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+# Experiment 2 universe: top-20 non-stablecoins by market cap on 2023-01-01 trading on Binance spot
+# (see docs/RESEARCH_LOG.md). Includes coins that were later delisted, to avoid survivorship bias.
+UNIVERSES = {
+    "u3": SYMBOLS,
+    "u20": ["BTC/USDT", "ETH/USDT", "BNB/USDT", "XRP/USDT", "ADA/USDT", "DOGE/USDT", "MATIC/USDT",
+            "DOT/USDT", "LTC/USDT", "SOL/USDT", "TRX/USDT", "SHIB/USDT", "AVAX/USDT", "UNI/USDT",
+            "LINK/USDT", "ATOM/USDT", "ETC/USDT", "XMR/USDT", "XLM/USDT", "BCH/USDT"],
+}
 
 
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--symbols", nargs="+", default=SYMBOLS)
+    ap.add_argument("--symbols", nargs="+", default=None)
+    ap.add_argument("--universe", default="u3", choices=sorted(UNIVERSES), help="named symbol list (ignored if --symbols given)")
+    ap.add_argument("--max-minutes", type=float, default=None,
+                    help="stop after this long and resume on the next run (fold results are cached in --out)")
+    ap.add_argument("--primary", default=None,
+                    help="pre-declared primary as model:horizon:policy, e.g. lgbm:1:cost_lf (default: v2 primary)")
+    ap.add_argument("--extra-costs", nargs="*", type=float, default=[10.0],
+                    help="also report the primary config at these costs (bps/side)")
     ap.add_argument("--timeframe", default="1h")
     ap.add_argument("--data-start", default="2020-01-01")
     ap.add_argument("--test-start", default="2023-01-01")
@@ -59,6 +76,12 @@ def fmt(x, nd=2):
 
 def main():
     a = parse_args()
+    if a.symbols is None:
+        a.symbols = UNIVERSES[a.universe]
+    if a.primary:
+        m_, h_, p_ = a.primary.split(":")
+        PRIMARY.update({"model": m_, "horizon": int(h_), "policy": p_})
+    t_start = time.time()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
     out = Path(a.out or f"reports/research/{run_id}")
     out.mkdir(parents=True, exist_ok=True)
@@ -68,7 +91,7 @@ def main():
     results, oos_store, ds_store = [], {}, {}
 
     for h in a.horizons:
-        ds = build_dataset(data, a.symbols, horizon=h, timeframe=a.timeframe)
+        ds = build_dataset(data, a.symbols, horizon=h, timeframe=a.timeframe, float32=len(a.symbols) > 5)
         feats = model_features(ds)
         ds_store[h] = ds
         for m in a.models:
@@ -78,8 +101,16 @@ def main():
                 oos = pd.read_csv(cache, parse_dates=["timestamp"])
                 print("     (reused cached out-of-sample predictions)")
             else:
-                oos = walk_forward(ds, feats, h, m, test_start=a.test_start, retrain_every=a.retrain_every,
-                                   train_window=a.train_window, bar=a.timeframe, verbose=False)
+                budget = None
+                if a.max_minutes is not None:
+                    budget = max(0.0, a.max_minutes * 60 - (time.time() - t_start))
+                try:
+                    oos = walk_forward(ds, feats, h, m, test_start=a.test_start, retrain_every=a.retrain_every,
+                                       train_window=a.train_window, bar=a.timeframe, verbose=True,
+                                       fold_cache=out / f"folds_{m}_h{h}", max_seconds=budget)
+                except TimeBudgetExceeded as e:
+                    print(f"[pause] {m} h={h}: {e}")
+                    sys.exit(3)
                 oos.to_csv(cache, index=False)
             oos = oos.merge(ds[["timestamp", "symbol", "vol_168"]], on=["timestamp", "symbol"], how="left")
             oos_store[(m, h)] = oos
@@ -122,6 +153,11 @@ def main():
         pf = run_portfolio(oos, pos, cost, data["funding"])
         prim_curve = pf["portfolio"]
         per_sym = {s: trading_metrics(d["net"], {s: d}, bootstrap=0) for s, d in pf["per_symbol"].items()}
+        cost_sens = {}
+        for cb in a.extra_costs:
+            c2 = cb / 1e4
+            pf2 = run_portfolio(oos, policy_positions(oos, PRIMARY["horizon"], PRIMARY["policy"], c2), c2, data["funding"])
+            cost_sens[cb] = trading_metrics(pf2["portfolio"], pf2["per_symbol"], bootstrap=0)
         yearly = pd.DataFrame({"model": yearly_returns(prim_curve),
                                **{k: yearly_returns(v) for k, v in base_curves.items()}})
     curves = []
@@ -133,9 +169,9 @@ def main():
         pc = run_portfolio(oc, policy_positions(oc, CANDIDATE["horizon"], CANDIDATE["policy"], cost), cost, data["funding"])
         curves.append((f"Paper-traded ({CANDIDATE['model']} h{CANDIDATE['horizon']} {CANDIDATE['policy']})", pc["portfolio"]))
     curves += [("Buy & hold", base_curves["buy_hold"]), ("Momentum 24h", base_curves["momentum_24h"])]
-    write_plot(out, curves)
+    write_plot(out, curves, f"Out-of-sample equity, equal weight across {len(a.symbols)} coins")
     write_summary(out, a, res, pd.DataFrame(base_rows), prim, per_sym if len(prim) else {},
-                  yearly if len(prim) else None, len(model_features(next(iter(ds_store.values())))))
+                  yearly if len(prim) else None, cost_sens if len(prim) else {}, len(model_features(next(iter(ds_store.values())))))
     with open(out / "run_config.json", "w") as fh:
         json.dump({**vars(a), "primary": PRIMARY, "run_id": run_id}, fh, indent=2, default=str)
     print(f"\n[done] report: {out / 'summary.md'}")
@@ -144,7 +180,7 @@ def main():
 CANDIDATE = {"model": "lgbm", "horizon": 1, "policy": "cost_lf"}  # what paper_trader.py runs
 
 
-def write_plot(out: Path, curves):
+def write_plot(out: Path, curves, title: str = "Out-of-sample equity, equal weight"):
     """curves: list of (label, hourly_return_series). Single log axis, direct labels, no overlap."""
     import matplotlib
     matplotlib.use("Agg")
@@ -179,7 +215,7 @@ def write_plot(out: Path, curves):
         ax.spines[sp].set_color("#b9b8b1")
     ax.tick_params(colors="#52514e", labelsize=8)
     ax.set_ylabel("Growth of 1 (log scale, after costs & funding)", color="#52514e", fontsize=9)
-    ax.set_title("Out-of-sample equity, equal weight BTC/ETH/SOL", color="#0b0b0b", fontsize=11, loc="left")
+    ax.set_title(title, color="#0b0b0b", fontsize=11, loc="left")
     ax.legend(frameon=False, fontsize=8, loc="upper left", labelcolor="#0b0b0b")
     fig.tight_layout()
     fig.subplots_adjust(right=0.78)
@@ -187,14 +223,14 @@ def write_plot(out: Path, curves):
     plt.close(fig)
 
 
-def write_summary(out, a, res, base, prim, per_sym, yearly, n_features):
+def write_summary(out, a, res, base, prim, per_sym, yearly, cost_sens, n_features):
     L = []
     L.append(f"# Research run {out.name}\n")
-    L.append(f"- Symbols: {', '.join(a.symbols)} ({a.timeframe}), data from {a.data_start}, "
+    L.append(f"- Symbols: {len(a.symbols)} symbols ({', '.join(s.split('/')[0] for s in a.symbols)}) ({a.timeframe}), data from {a.data_start}, "
              f"**out-of-sample from {a.test_start}** (walk-forward, retrain every {a.retrain_every}, "
              f"train window {'expanding' if not a.train_window else a.train_window}, purge = horizon).")
     L.append(f"- {n_features} features, one model pooled across symbols. Costs {a.cost_bps:g} bps/side + perp funding. "
-             f"{'Long-only' if a.long_only else 'Long/short'}.")
+             f"{'Long-only' if a.long_only else 'Long/short'}. Portfolio = equal weight across coins listed at each hour.")
     L.append(f"- Primary config (fixed in advance): `{PRIMARY}`.")
     L.append(f"- Grid size: {len(res)} configs. **Picking the best of {len(res)} inflates results**; "
              "a config should only be trusted if it is robust across neighbouring settings and years.\n")
@@ -208,6 +244,14 @@ def write_summary(out, a, res, base, prim, per_sym, yearly, n_features):
                  f"{p.sharpe:+.2f} [{p.sharpe_ci_low:+.2f}, {p.sharpe_ci_high:+.2f}] | {p.p_sharpe_le_0:.2f} | "
                  f"{p.total_return_pct:+.1f}% | {p.max_dd_pct:.1f}% | {p.turnover_per_year:.0f}x | "
                  f"{p.cost_drag_pct_per_year:.1f}% | {p.funding_pct_per_year:+.1f}% |\n")
+        if cost_sens:
+            L.append("Cost sensitivity (primary config):\n")
+            L.append("| Cost bps/side | Net Sharpe | Return | Max DD |")
+            L.append("|---|---|---|---|")
+            L.append(f"| {a.cost_bps:g} | {p.sharpe:+.2f} | {p.total_return_pct:+.1f}% | {p.max_dd_pct:.1f}% |")
+            for cb, m in cost_sens.items():
+                L.append(f"| {cb:g} | {m['sharpe']:+.2f} | {m['total_return_pct']:+.1f}% | {m['max_dd_pct']:.1f}% |")
+            L.append("")
         L.append("Per symbol:\n")
         L.append("| Symbol | Sharpe | Return | Max DD |")
         L.append("|---|---|---|---|")

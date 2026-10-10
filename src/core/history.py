@@ -34,6 +34,10 @@ KLINE_COLS = [
 OHLCV_KEEP = ["open", "high", "low", "close", "volume", "quote_volume", "trades", "taker_buy_base"]
 
 
+# Perps whose contract symbol differs from spot (rate is per unit notional, so it is comparable).
+FUNDING_SYMBOL_OVERRIDES = {"SHIBUSDT": "1000SHIBUSDT", "PEPEUSDT": "1000PEPEUSDT", "BONKUSDT": "1000BONKUSDT"}
+
+
 class DataFetchError(RuntimeError):
     pass
 
@@ -175,7 +179,8 @@ def update_funding(
     cursor = start_ms if cached.empty else int(cached.index[-1].value // 1_000_000) + 1
     rows = []
     while True:
-        batch = _get(FUNDING_URL, {"symbol": _binance_symbol(symbol), "startTime": cursor, "limit": 1000})
+        perp = FUNDING_SYMBOL_OVERRIDES.get(_binance_symbol(symbol), _binance_symbol(symbol))
+        batch = _get(FUNDING_URL, {"symbol": perp, "startTime": cursor, "limit": 1000}, retries=2)
         if not batch:
             break
         rows.extend(batch)
