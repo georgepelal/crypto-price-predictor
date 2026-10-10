@@ -60,6 +60,7 @@ Research results and decisions go in `docs/RESEARCH_LOG.md`.
 
 ## Change log
 - 2026-10-08 · Claude (Cowork) · Reviewed repo, ran tests, created this file.
+- 2026-10-10 · Claude (Cowork) · Fixed lost exec bit on run_live_2weeks.sh, added env pre-flight check (macOS needs `brew install libomp` for LightGBM), silenced urllib3 LibreSSL warning.
 - 2026-10-08 · Claude (Cowork) · Baseline commit of Antigravity's uncommitted work (branch `honest-ml`).
   Added core pipeline (`src/core/`, `research.py`, `train.py`, `paper_trader.py`, `tests/test_core.py`,
   `docs/RESEARCH_LOG.md`), pinned requirements, daemon scripts now run `paper_trader.py`,

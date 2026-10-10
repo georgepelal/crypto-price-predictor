@@ -14,6 +14,9 @@ Every hour, ~15 s after the candle closes:
 """
 
 import argparse
+import warnings
+
+warnings.filterwarnings("ignore", message=".*OpenSSL.*")
 import sqlite3
 import sys
 import time

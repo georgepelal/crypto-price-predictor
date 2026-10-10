@@ -32,6 +32,14 @@ echo " Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 echo " Logging to: $LOG_FILE"
 echo "=================================================================="
 
+# Pre-flight: make sure the environment can load the model before going to the background
+if ! "$PYTHON_BIN" -W ignore -c "import lightgbm, sklearn, pandas" > /dev/null 2>&1; then
+    echo "[!] Python environment check failed. Run this to see the error:"
+    echo "    $PYTHON_BIN -c 'import lightgbm'"
+    echo "    (on macOS LightGBM needs OpenMP: brew install libomp)"
+    exit 1
+fi
+
 # Run caffeinate to prevent Mac from sleeping system while process runs, in background
 nohup caffeinate -s "$PYTHON_BIN" paper_trader.py >> "$LOG_FILE" 2>&1 &
 NEW_PID=$!
