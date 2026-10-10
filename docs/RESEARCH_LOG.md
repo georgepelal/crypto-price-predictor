@@ -62,7 +62,9 @@ or it only pays in high-volatility regimes. The paper trader is the test of whic
 
 **Decision:** criteria passed → propose to Giorgos switching the paper trader to the U20-trained model trading
 the 18 still-listed U20 coins (MATIC and XMR can no longer be traded). ~8 trades/week at 2026 volatility (up to ~30 in volatile years) instead of ~1–2, so 4 weeks
-of paper trading becomes informative. Not deployed until he agrees (it resets the paper ledger).
+of paper trading becomes informative. **Giorgos agreed → deployed 2026-10-10** (ledger `data/paper_u20.db`).
+Evaluation plan for the paper run (fixed now): after ≥ 4 weeks compare live net bps/trade and trades/week with the
+2026 backtest (+21 bps net/trade, ~8 trades/week) and live-vs-close slippage with the 1-minute estimate (~2–6 bps).
 
 ---
 

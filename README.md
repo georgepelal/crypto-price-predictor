@@ -18,12 +18,13 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # once
 ```
 
 What it does: downloads real Binance data into an append-only cache, builds 65 lookahead-free features,
-trains one LightGBM model pooled across coins, evaluates it walk-forward (retrain monthly, never tuned on
+trains one LightGBM model pooled across 20 coins (`src/core/universe.py`), evaluates it walk-forward (retrain monthly, never tuned on
 test data) against buy & hold and momentum with costs and funding, and paper-trades the result hourly
 using exactly the same code path.
 
-Honest status: the model predicts direction better than chance consistently (1h AUC ≈ 0.556 out of
-sample), but after trading costs the edge is small and appears mainly in high-volatility periods.
+Honest status: the model predicts direction better than chance consistently (1h AUC ≈ 0.55 out of
+sample). On 20 coins the cost-aware strategy has a net Sharpe of +1.85 (95% CI +0.97..+2.80) over 2023-2026,
+but nearly all of it was earned before 2025 and it has been roughly flat since.
 It is a research/paper-trading system, not a proven money-maker. See `docs/RESEARCH_LOG.md`.
 
 ---

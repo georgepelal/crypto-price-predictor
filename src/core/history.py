@@ -230,19 +230,31 @@ def update_fear_greed(cache_dir: Optional[Path] = None, offline: bool = False, m
 
 
 def update_all(symbols, timeframe: str = "1h", start: str = "2020-01-01", offline: bool = False,
-               cache_dir: Optional[Path] = None, verbose: bool = True) -> dict:
-    """Refresh every source for every symbol. Returns {"ohlcv": {sym: df}, "funding": {...}, "fng": df}."""
+               cache_dir: Optional[Path] = None, verbose: bool = True, workers: int = 1) -> dict:
+    """Refresh every source for every symbol. Returns {"ohlcv": {sym: df}, "funding": {...}, "fng": df}.
+    ``workers`` > 1 downloads symbols in parallel (each symbol has its own cache files)."""
     out = {"ohlcv": {}, "funding": {}, "fng": None}
-    for sym in symbols:
-        out["ohlcv"][sym] = update_ohlcv(sym, timeframe, start, cache_dir, offline)
+
+    def one(sym):
+        o = update_ohlcv(sym, timeframe, start, cache_dir, offline)
         try:
-            out["funding"][sym] = update_funding(sym, start, cache_dir, offline)
+            f = update_funding(sym, start, cache_dir, offline)
         except DataFetchError as e:
             if verbose:
                 print(f"[!] funding unavailable for {sym}: {e}")
-            out["funding"][sym] = None
+            f = None
+        return sym, o, f
+
+    if workers > 1 and not offline:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(workers) as ex:
+            results = list(ex.map(one, symbols))
+    else:
+        results = [one(s) for s in symbols]
+    for sym, o, f in results:
+        out["ohlcv"][sym] = o
+        out["funding"][sym] = f
         if verbose:
-            o = out["ohlcv"][sym]
             print(f"[data] {sym} {timeframe}: {len(o):,} bars {o.index[0]:%Y-%m-%d} -> {o.index[-1]:%Y-%m-%d %H:%M}")
     try:
         out["fng"] = update_fear_greed(cache_dir, offline)

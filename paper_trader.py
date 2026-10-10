@@ -14,6 +14,7 @@ Every hour, ~15 s after the candle closes:
 """
 
 import argparse
+import os
 import warnings
 
 warnings.filterwarnings("ignore", message=".*OpenSSL.*")
@@ -23,6 +24,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -30,7 +32,8 @@ from src.core import history
 from src.core.deploy import DEFAULT_SPEC, latest_signals, load_model, model_age_days, model_path, train_final
 from src.core.strategy import step_position
 
-DB_PATH = Path("data/paper_core.db")
+# One ledger per deployed universe. data/paper_core.db = the 3-coin run of 2026-10-10 (archived).
+DB_PATH = Path(os.environ.get("PAPER_DB", f"data/paper_{DEFAULT_SPEC.get('universe', 'u3')}.db"))
 START_CAPITAL = 10_000.0
 TAKER_FEE = 0.0005
 SLIPPAGE = 0.0002
@@ -48,7 +51,8 @@ def db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH)
     con.execute("""CREATE TABLE IF NOT EXISTS signals (
         decided_at TEXT, symbol TEXT, bar_open TEXT, prob_up REAL, exp_ret REAL, hurdle REAL,
-        pos_before REAL, pos_after REAL, live_price REAL, bar_close_price REAL, model_trained_at TEXT)""")
+        pos_before REAL, pos_after REAL, live_price REAL, bar_close_price REAL, model_trained_at TEXT,
+        priced_at TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, side REAL, status TEXT,
         entry_time TEXT, entry_price REAL, qty REAL, notional REAL,
@@ -74,10 +78,14 @@ def open_trade(con, symbol):
     return dict(zip(keys, r))
 
 
-def live_price(symbol: str) -> float:
-    r = requests.get(TICKER_URL, params={"symbol": symbol.replace("/", "")}, timeout=10)
+def live_prices(symbols) -> dict:
+    """Last trade price for all symbols in ONE request (keeps decision latency low)."""
+    import json as _json
+    syms = [x.replace("/", "") for x in symbols]
+    r = requests.get(TICKER_URL, params={"symbols": _json.dumps(syms, separators=(",", ":"))}, timeout=10)
     r.raise_for_status()
-    return float(r.json()["price"])
+    by = {d["symbol"]: float(d["price"]) for d in r.json()}
+    return {s: by[s.replace("/", "")] for s in symbols}
 
 
 def accrue_funding(con, trade, funding_df, now):
@@ -128,48 +136,69 @@ def enter_trade(con, symbol, side, price, now):
 def cycle(spec: dict) -> None:
     now = pd.Timestamp.now(tz="UTC")
     expected_bar = now.floor("1h") - pd.Timedelta(hours=1)
+    symbols = list(spec["symbols"])
     data = None
     for attempt in range(6):
-        data = history.update_all(spec["symbols"], spec["timeframe"], spec["data_start"], verbose=False)
-        last = min(df.index[-1] for df in data["ohlcv"].values())
-        if last >= expected_bar:
+        data = history.update_all(symbols, spec["timeframe"], spec["data_start"], verbose=False, workers=8)
+        stale = [s for s in symbols if data["ohlcv"][s].index[-1] < expected_bar]
+        if not stale:
             break
-        log(f"waiting for bar {expected_bar:%H:%M} (have {last:%H:%M}) ...")
+        log(f"waiting for bar {expected_bar:%H:%M} on {', '.join(stale)} ...")
         time.sleep(10)
-    else:
-        log("[!] candles not available, skipping this hour")
-        return
+    if stale:
+        log(f"[!] no fresh candle for {', '.join(stale)} - skipping them this hour (delisted/outage?)")
+        symbols = [s for s in symbols if s not in stale]
+        if "BTC/USDT" in stale or not symbols:
+            log("[!] market data unavailable, skipping this hour")
+            return
 
-    if not model_path(spec).exists() or model_age_days(load_model(spec)) > spec["retrain_days"]:
-        log("retraining model (older than retrain interval) ...")
-        train_final(spec, offline=True, verbose=False)
+    need_train = not model_path(spec).exists()
+    if need_train:
+        log("no model found - training (one-off) ...")
+        train_final(spec, offline=False, verbose=False)
     bundle = load_model(spec)
+
+    sigs = latest_signals(bundle, data, symbols)
+    prices = live_prices(symbols)
+    priced_at = pd.Timestamp.now(tz="UTC")
 
     con = db()
     ensure_sleeves(con, spec["symbols"])
     allow_short = spec["policy"] == "cost_ls"
-    for sig in latest_signals(bundle, data):
+    changes = []
+    for sig in sigs:
         sym = sig["symbol"]
         trade = open_trade(con, sym)
         accrue_funding(con, trade, data["funding"].get(sym), now)
         trade = open_trade(con, sym)
         cur = trade["side"] if trade else 0.0
         new = step_position(cur, sig["exp_ret"], spec["cost_per_side"], allow_short)
-        price = live_price(sym)
+        price = prices[sym]
         if new != cur:
             if trade:
-                pnl = close_trade(con, trade, price, now)
-                log(f"{sym}: CLOSE {'LONG' if cur > 0 else 'SHORT'} @ {price:,.2f}  pnl={pnl:+.2f}")
+                pnl = close_trade(con, trade, price, priced_at)
+                changes.append(f"CLOSE {sym} @ {price:,.6g} pnl={pnl:+.2f}")
             if new != 0:
-                enter_trade(con, sym, new, price, now)
-                log(f"{sym}: OPEN {'LONG' if new > 0 else 'SHORT'} @ {price:,.2f}")
-        con.execute("INSERT INTO signals VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                enter_trade(con, sym, new, price, priced_at)
+                changes.append(f"OPEN {'LONG' if new > 0 else 'SHORT'} {sym} @ {price:,.6g} (E[r]={sig['exp_ret'] * 1e4:+.0f}bps)")
+        con.execute("INSERT INTO signals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (str(now), sym, str(sig["bar_open"]), sig["prob_up"], sig["exp_ret"], sig["hurdle"],
-                     cur, new, price, sig["bar_close_price"], bundle["meta"]["trained_at"]))
-        log(f"{sym}: P(up)={sig['prob_up']:.3f} E[r]={sig['exp_ret'] * 1e4:+.1f}bps "
-            f"hurdle={sig['hurdle'] * 1e4:.0f}bps pos {cur:+.0f} -> {new:+.0f}")
+                     cur, new, price, sig["bar_close_price"], bundle["meta"]["trained_at"], str(priced_at)))
     con.commit()
+    holding = [r[0] for r in con.execute("SELECT symbol FROM trades WHERE status='OPEN'")]
     con.close()
+    best = max(sigs, key=lambda x: x["exp_ret"])
+    log(f"bar {expected_bar:%H:%M}: {len(sigs)} coins, priced {(priced_at - now.floor('1h')).total_seconds():.0f}s after close, "
+        f"best E[r]={best['exp_ret'] * 1e4:+.1f}bps ({best['symbol']}) vs hurdle {best['hurdle'] * 1e4:.0f}bps, "
+        f"holding: {', '.join(holding) or 'nothing'}")
+    for c in changes:
+        log("  " + c)
+
+    # Retrain AFTER acting, so the monthly retrain never delays a decision.
+    if not need_train and model_age_days(bundle) > spec["retrain_days"]:
+        log("retraining model (older than retrain interval) ...")
+        train_final(spec, offline=False, verbose=False)
+        log("retrain done")
 
 
 # --------------------------------------------------------------------------- status
@@ -187,14 +216,22 @@ def status() -> None:
     print(f"Signals logged : {len(sigs)}  (first {sigs.decided_at.min() if len(sigs) else '-'}, last {sigs.decided_at.max() if len(sigs) else '-'})")
     print(f"Closed trades  : {len(closed)}  win rate {100 * (closed.pnl > 0).mean() if len(closed) else 0:.1f}%")
     print(f"Realized PnL   : {closed.pnl.sum():+,.2f} USD   fees {trades.fees.sum():,.2f}   funding {trades.funding.sum():+,.2f}")
+    print(f"Universe       : {DEFAULT_SPEC.get('universe')} ({len(DEFAULT_SPEC['symbols'])} coins), ledger {DB_PATH}")
     print(f"Cash (all sleeves): {sleeves.cash.sum():,.2f} USD  (start {START_CAPITAL:,.0f})")
     op = trades[trades.status == "OPEN"]
     for _, t in op.iterrows():
         print(f"  OPEN {t.symbol} {'LONG' if t.side > 0 else 'SHORT'} since {t.entry_time} @ {t.entry_price:,.2f}")
     if len(sigs):
         print("\nLatest signals:")
-        print(sigs.tail(len(DEFAULT_SPEC["symbols"]))[["decided_at", "symbol", "prob_up", "exp_ret", "pos_after"]]
-              .to_string(index=False))
+        last = sigs[sigs.decided_at == sigs.decided_at.max()].copy()
+        last["exp_ret_bps"] = (1e4 * last["exp_ret"]).round(1)
+        print(last.sort_values("exp_ret", ascending=False)[["symbol", "prob_up", "exp_ret_bps", "pos_after"]]
+              .round(3).to_string(index=False))
+        if "priced_at" in sigs.columns and sigs["priced_at"].notna().any():
+            lat = (pd.to_datetime(sigs.priced_at) - pd.to_datetime(sigs.decided_at).dt.floor("h")).dt.total_seconds()
+            slip = 1e4 * np.log(sigs.live_price / sigs.bar_close_price)
+            print(f"\nLatency: median {lat.median():.0f}s after close; live vs bar-close price: "
+                  f"mean {slip.mean():+.1f} bps, mean |diff| {slip.abs().mean():.1f} bps")
 
 
 def main():
@@ -208,7 +245,7 @@ def main():
         return status()
     if a.once:
         return cycle(spec)
-    log(f"paper trader started: {spec['symbols']} model={spec['model']} h={spec['horizon']} policy={spec['policy']}")
+    log(f"paper trader started: {spec.get('universe')} {len(spec['symbols'])} coins model={spec['model']} h={spec['horizon']} policy={spec['policy']}")
     while True:
         now = pd.Timestamp.now(tz="UTC")
         nxt = now.floor("1h") + pd.Timedelta(hours=1, seconds=a.delay)

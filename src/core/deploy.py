@@ -17,9 +17,14 @@ from src.core import history
 from src.core.dataset import build_dataset, build_symbol_features, model_features
 from src.core.models import make_model
 from src.core.strategy import expected_return
+from src.core.universe import U20, tradable
 
+# Deployed since 2026-10-10 (experiment 2): train on all 20 coins of U20 (incl. delisted history),
+# trade the ones still listed. Previous deployment (2026-10-08..10): universe u3, BTC/ETH/SOL.
 DEFAULT_SPEC = {
-    "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+    "universe": "u20",
+    "train_symbols": U20,
+    "symbols": tradable(U20),
     "timeframe": "1h",
     "data_start": "2020-01-01",
     "model": "lgbm",
@@ -32,14 +37,16 @@ MODEL_DIR = Path("models")
 
 
 def model_path(spec: dict) -> Path:
-    return MODEL_DIR / f"core_{spec['model']}_{spec['timeframe']}_h{spec['horizon']}.joblib"
+    return MODEL_DIR / f"core_{spec['model']}_{spec['timeframe']}_h{spec['horizon']}_{spec.get('universe', 'u3')}.joblib"
 
 
 def train_final(spec: Optional[dict] = None, offline: bool = False, verbose: bool = True) -> Path:
     """Fit on ALL labelled history (same recipe as each walk-forward fold) and save with metadata."""
     spec = {**DEFAULT_SPEC, **(spec or {})}
-    data = history.update_all(spec["symbols"], spec["timeframe"], spec["data_start"], offline=offline, verbose=verbose)
-    ds = build_dataset(data, spec["symbols"], spec["horizon"], spec["timeframe"])
+    train_syms = spec.get("train_symbols", spec["symbols"])
+    data = history.update_all(train_syms, spec["timeframe"], spec["data_start"], offline=offline, verbose=verbose)
+    # same dtype choice as research.py so the deployed model matches the evaluated one
+    ds = build_dataset(data, train_syms, spec["horizon"], spec["timeframe"], float32=len(train_syms) > 5)
     feats = model_features(ds)
     tr = ds[ds["target"].notna()]
     model = make_model(spec["model"])
@@ -76,11 +83,11 @@ def model_age_days(bundle: dict) -> float:
     return (pd.Timestamp.now(tz="UTC") - t).total_seconds() / 86400
 
 
-def latest_signals(bundle: dict, data: dict) -> List[Dict]:
+def latest_signals(bundle: dict, data: dict, symbols: Optional[List[str]] = None) -> List[Dict]:
     """Prediction for the most recent CLOSED bar of every symbol."""
     meta = bundle["meta"]
     out = []
-    for sym in meta["symbols"]:
+    for sym in symbols or meta["symbols"]:
         f = build_symbol_features(data, sym, meta["timeframe"])
         row = f.iloc[[-1]]
         missing = [c for c in meta["features"] if c not in row.columns]

@@ -36,7 +36,8 @@ Research results and decisions go in `docs/RESEARCH_LOG.md`.
 | `src/core/deploy.py` | `DEFAULT_SPEC` (what is deployed), `train_final()`, `latest_signals()`. |
 | `research.py` | Full walk-forward grid + baselines → `reports/research/<run>/summary.md`, `equity.png`. `--universe u3/u20`, `--primary model:h:policy`, `--reuse` + `--max-minutes` to run long grids in resumable chunks (memory: U20 needs ~2.5 GB). |
 | `train.py` | Train the production model on all history → `models/core_lgbm_1h_h1.joblib` (+ `.json` metadata). |
-| `paper_trader.py` | Hourly paper trader (no real orders) → `data/paper_core.db`. `--once`, `--status`. Retrains itself every 30 days. |
+| `paper_trader.py` | Hourly paper trader (no real orders) → `data/paper_<universe>.db` (override with env `PAPER_DB`). `--once`, `--status`. Parallel data refresh + one batched price request (~5 s per cycle for 18 coins). Retrains every 30 days, after acting. Skips coins with no fresh candle. |
+| `src/core/universe.py` | Named universes (`u3`, `u20`), delisted list, `tradable()`. Shared by research and live. |
 | `run_live_2weeks.sh` / `stop_live_2weeks.sh` / `check_status.sh` | Background daemon for `paper_trader.py` (macOS `caffeinate`), log in `logs/live_trader.log`. |
 | `tests/test_core.py` | No-lookahead (truncation) test, purge test, P&L timing/cost tests, cache-merge test. |
 
@@ -53,17 +54,20 @@ Research results and decisions go in `docs/RESEARCH_LOG.md`.
 - (Fixed 2026-10-08) short live fetches used to overwrite the training cache; `fetch_ohlcv_ccxt` now merges.
 
 ## Current status (2026-10-08)
-- Deployed to paper: **lgbm, 1h horizon, cost-aware long/flat** on BTC/ETH/SOL.
+- Deployed to paper (since 2026-10-10 ~11:00 UTC): **lgbm, 1h horizon, cost-aware long/flat, trained on U20
+  (`src/core/universe.py`), trading the 18 still-listed U20 coins**. Ledger `data/paper_u20.db`, model
+  `models/core_lgbm_1h_h1_u20.joblib`. The earlier 3-coin run (a few hours) is archived in `data/paper_core.db`.
 - Out-of-sample 2023-01 → 2026-10: real predictive skill (AUC 0.557, IC t≈15) but the tradeable edge
   after costs is small and episodic. Details and caveats: `docs/RESEARCH_LOG.md`.
 - 2026-10-10: experiment 2 (20 coins) passed its pre-declared test (Sharpe +1.85, CI [+0.97, +2.80]) but the
   edge has been ~flat since 2025-01. Proposed to Giorgos: switch the paper trader to the 20-coin model.
-- Paper trader running on Giorgos's Mac since 2026-10-10 09:43 UTC (3 coins). Live `signals.live_price` vs
+- Paper trader runs on Giorgos's Mac (3 coins 09:43–~11:00 UTC 2026-10-10, then U20). Live `signals.live_price` vs
   `bar_close_price` measures real latency slippage.
 
 ## Change log
 - 2026-10-08 · Claude (Cowork) · Reviewed repo, ran tests, created this file.
-- 2026-10-10 · Claude (Cowork) · Experiment 2 (20-coin universe, pre-declared): passed. Added `research.py --universe u20 --primary ... --max-minutes` (resumable, fold cache in `--out`), funding symbol overrides (1000SHIB), float32 datasets, equal weight across listed coins, `scripts/exp2_checks.py`, `scripts/exp2_latency.py`. Paper trader NOT changed yet (awaiting Giorgos).
+- 2026-10-10 · Claude (Cowork) · Switched deployment to U20: `DEFAULT_SPEC` (train on 20, trade 18), new ledger `data/paper_u20.db`, faster cycle (parallel refresh, batched prices), latency logged (`signals.priced_at`), `--status` shows latency & live-vs-close slippage. Note: in the Cowork Linux VM, sqlite on the mounted folder fails without delete permission — test with `PAPER_DB=$HOME/x.db`.
+- 2026-10-10 · Claude (Cowork) · Experiment 2 (20-coin universe, pre-declared): passed. Added `research.py --universe u20 --primary ... --max-minutes` (resumable, fold cache in `--out`), funding symbol overrides (1000SHIB), float32 datasets, equal weight across listed coins, `scripts/exp2_checks.py`, `scripts/exp2_latency.py`. Paper trader switched to U20 after Giorgos agreed (same day).
 - 2026-10-10 · Claude (Cowork) · Fixed lost exec bit on run_live_2weeks.sh, added env pre-flight check (macOS needs `brew install libomp` for LightGBM), silenced urllib3 LibreSSL warning.
 - 2026-10-08 · Claude (Cowork) · Baseline commit of Antigravity's uncommitted work (branch `honest-ml`).
   Added core pipeline (`src/core/`, `research.py`, `train.py`, `paper_trader.py`, `tests/test_core.py`,

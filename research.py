@@ -31,15 +31,7 @@ from src.core.walkforward import TimeBudgetExceeded, walk_forward
 # v1 primary (fixed before the first run, 2026-10-08): naive overlapping rule -> failed after costs.
 # v2 primary (fixed before running the cost-aware rule): same model & horizon, cost-aware decision rule.
 PRIMARY = {"model": "lgbm", "horizon": 24, "policy": "cost_ls"}
-SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-# Experiment 2 universe: top-20 non-stablecoins by market cap on 2023-01-01 trading on Binance spot
-# (see docs/RESEARCH_LOG.md). Includes coins that were later delisted, to avoid survivorship bias.
-UNIVERSES = {
-    "u3": SYMBOLS,
-    "u20": ["BTC/USDT", "ETH/USDT", "BNB/USDT", "XRP/USDT", "ADA/USDT", "DOGE/USDT", "MATIC/USDT",
-            "DOT/USDT", "LTC/USDT", "SOL/USDT", "TRX/USDT", "SHIB/USDT", "AVAX/USDT", "UNI/USDT",
-            "LINK/USDT", "ATOM/USDT", "ETC/USDT", "XMR/USDT", "XLM/USDT", "BCH/USDT"],
-}
+from src.core.universe import U3 as SYMBOLS, UNIVERSES  # noqa: E402
 
 
 def parse_args():

@@ -25,7 +25,7 @@ else
 fi
 
 echo "------------------------------------------------------------------"
-echo " PAPER LEDGER (data/paper_core.db)"
+echo " PAPER LEDGER"
 cd "$SCRIPT_DIR" && "$PYTHON_BIN" paper_trader.py --status
 
 echo "------------------------------------------------------------------"
