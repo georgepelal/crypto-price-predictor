@@ -6,6 +6,35 @@ Reproduce with `.venv/bin/python research.py` (full report lands in `reports/res
 
 ---
 
+## 2026-10-10 — Experiment 2: wider universe (PRE-DECLARED, written before running)
+
+**Question.** Does the same model/rule hold up on many more coins? 3 coins over ~4 years gives too few
+independent bets to tell skill from luck; 20 coins gives ~7x more.
+
+**Universe U20 (fixed by a rule, not by performance).** The 20 largest non-stablecoin cryptos by market
+cap on **2023-01-01** (start of the test period) that traded on Binance spot against USDT:
+BTC ETH BNB XRP ADA DOGE MATIC DOT LTC SOL TRX SHIB AVAX UNI LINK ATOM ETC XMR XLM BCH.
+MATIC (spot data ends 2024-09, renamed POL) and XMR (delisted 2024-02) are **kept** and simply drop out
+when their data ends — dropping them would be survivorship bias. Portfolio = equal weight across the
+coins that exist at each hour. SHIB funding comes from the 1000SHIBUSDT perp.
+
+**Everything else unchanged:** same 65 features, lgbm with the same fixed hyper-parameters, walk-forward
+(retrain every 30 days, expanding window, purge = horizon), horizon 1h, cost-aware long/flat rule,
+7 bps/side + funding, test 2023-01-01 → 2026-10.
+
+**Primary:** lgbm · h=1 · cost_lf on U20. **Pass only if all three hold:**
+1. Net Sharpe 95% bootstrap CI lower bound > 0.
+2. Positive net return in at least 3 of the 4 calendar years (2023, 2024, 2025, 2026 YTD).
+3. Net Sharpe still > 0.5 at 10 bps/side cost (alts are less liquid than BTC).
+
+**Secondary (reported, not used for the decision):** (a) the U20-trained model's P&L on BTC/ETH/SOL only,
+vs v1's +1.46 (does training on more coins help?); (b) logistic regression on U20.
+
+**Decision rule.** Pass → propose moving the paper trader to U20. Fail → keep the 3-coin paper trader
+as is, record the failure here, and do not try variations of this universe until a new hypothesis is written down.
+
+---
+
 ## 2026-10-08 — Core pipeline v1 (Claude)
 
 **Setup.** 6.8 years of Binance 1h data (2020-01 → 2026-10), 65 scale-free features (momentum,
