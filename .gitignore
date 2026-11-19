@@ -15,4 +15,6 @@ data/trader.pid
 scratch/
 data/history/
 data/paper_core.db
+data/paper_u20.db
 models/*.json
+AGENTS.md

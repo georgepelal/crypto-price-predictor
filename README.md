@@ -1,8 +1,8 @@
 # Crypto ML Price Predictor
 
-> **Start here (2026-10-08):** the maintained pipeline is the **core pipeline** in `src/core/`.
-> Everything below the "Legacy" divider describes the earlier pipeline, kept for reference.
-> Agents: read `AGENTS.md`. Results and decisions: `docs/RESEARCH_LOG.md`.
+An institutional-grade Quantitative Machine Learning research pipeline for cryptocurrency price movement forecasting, walk-forward validation, and live paper trading.
+
+> **Active Pipeline:** The maintained production pipeline is the **core pipeline** in `src/core/`. Detailed walk-forward methodology and empirical findings are documented in [`docs/RESEARCH_LOG.md`](docs/RESEARCH_LOG.md).
 
 ## Core pipeline — quickstart
 
